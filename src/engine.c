@@ -199,6 +199,50 @@ void opp_cancel(Opponent *o) {
     }
 }
 
+bool opp_eval_after(Opponent *o, const Position *p, Move m, int nodes, int *cp) {
+    if (o->pid <= 0) return false;
+    opp_cancel(o);
+    /* let the cancelled search's bestmove arrive and be discarded */
+    if (o->ignore > 0) {
+        char line[1024];
+        for (int tries = 0; o->ignore > 0 && tries < 200; tries++) {
+            while (o->ignore > 0 && sf_line(o, line, sizeof line))
+                if (!strncmp(line, "bestmove", 8)) o->ignore--;
+            if (o->ignore > 0) { struct pollfd pf = {o->from_fd, POLLIN, 0}; poll(&pf, 1, 20); }
+        }
+        o->ignore = 0;
+    }
+    char fen[100], uci[8];
+    pos_to_fen(p, fen, sizeof fen);
+    move_to_uci(m, uci);
+    sf_send(o, "setoption name UCI_LimitStrength value false");
+    sf_send(o, "position fen %s moves %s", fen, uci);
+    sf_send(o, "go nodes %d", nodes);
+    char line[1024];
+    int score = 0;
+    bool have = false;
+    for (int waited = 0; waited < 20000;) {
+        if (!sf_line(o, line, sizeof line)) {
+            struct pollfd pf = {o->from_fd, POLLIN, 0};
+            poll(&pf, 1, 20);
+            waited += 20;
+            continue;
+        }
+        if (!strncmp(line, "bestmove", 8)) break;
+        char *sc = strstr(line, " score ");
+        if (!sc) continue;
+        int v;
+        /* scores are for the side to move, i.e. the opponent */
+        if (sscanf(sc, " score cp %d", &v) == 1) { score = -v; have = true; }
+        else if (sscanf(sc, " score mate %d", &v) == 1) {
+            score = v <= 0 ? 10000 + v : -10000 + v; /* mate 0: we delivered mate */
+            have = true;
+        }
+    }
+    if (have) *cp = score;
+    return have;
+}
+
 bool opp_busy(const Opponent *o) { return o->sf_busy || o->ai_busy; }
 
 void opp_destroy(Opponent *o) {

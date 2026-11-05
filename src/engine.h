@@ -18,6 +18,9 @@ void opp_go(Opponent *o, const Game *g, int level);
 bool opp_poll(Opponent *o, Move *out); /* true once, when the move is ready */
 void opp_cancel(Opponent *o);
 bool opp_busy(const Opponent *o);
+/* Blocking: centipawns for the side that plays m, after m (mates as
+ * +-10000). Stockfish only; false with the built-in engine. */
+bool opp_eval_after(Opponent *o, const Position *p, Move m, int nodes, int *cp);
 
 /* ai.c: built-in engine */
 typedef struct Ai Ai;

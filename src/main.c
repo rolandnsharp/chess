@@ -71,11 +71,21 @@ static bool save_pgn(App *a, char *path_out, size_t n) {
     return true;
 }
 
+static Drill *cur_drill(App *a);
+static void drill_finish(App *a, bool ok, const char *extra);
+
 static void after_move(App *a, Move m) {
     a->animating = true;
     a->anim_move = m;
     a->anim_start = a->now;
     GameStatus st = game_status(&a->game);
+    Drill *d = cur_drill(a);
+    if (d && a->dstate == DS_PLAY && st != ST_ONGOING) {
+        const char *res = game_result(&a->game);
+        bool won = strcmp(res, a->human == WHITE ? "1-0" : "0-1") == 0;
+        drill_finish(a, won, won ? "Converted. " : "Not won this time. ");
+        return;
+    }
     if (st != ST_ONGOING && !a->saved) {
         char path[1200];
         a->saved = save_pgn(a, path, sizeof path);
@@ -86,11 +96,159 @@ static void after_move(App *a, Move m) {
     }
 }
 
+/* ------------------------------------------------------------ drills */
+
+static Drill *cur_drill(App *a) { return a->drill >= 0 ? &a->drills.d[a->drill] : NULL; }
+
+static bool solution_move(App *a, int step, Move *m) {
+    char why[256];
+    Drill *d = cur_drill(a);
+    return step < d->nsol && san_parse(&a->game.pos, d->sol[step], false, m, why, sizeof why) != SAN_ERR;
+}
+
+static void drill_record(App *a, bool ok) {
+    if (a->drecorded) return;
+    a->drecorded = true;
+    drills_record(&a->drills, a->drill, ok);
+    a->dsess_n++;
+    if (ok) a->dsess_ok++;
+}
+
+static void drill_finish(App *a, bool ok, const char *extra) {
+    Drill *d = cur_drill(a);
+    drill_record(a, ok);
+    a->dstate = DS_DONE;
+    say(a, ok ? MSG_GOOD : MSG_ERROR, "%s%s%s  ·  Enter for the next drill.",
+        ok ? "Correct! " : "Missed. ", extra ? extra : "", d->info[0] ? d->info : "");
+}
+
+static void drill_end_session(App *a) {
+    int n = a->dsess_n, ok = a->dsess_ok;
+    a->drill = -1;
+    a->banner[0] = 0;
+    new_game(a, NULL, a->human);
+    say(a, MSG_GOOD, "Drills finished: %d of %d right first time. Back to free play.", ok, n);
+}
+
+static void drill_next(App *a) {
+    int idx = drills_next(&a->drills);
+    if (idx < 0) { drill_end_session(a); return; }
+    a->drill = idx;
+    Drill *d = &a->drills.d[idx];
+    Position p;
+    pos_from_fen(&p, d->fen);
+    int side = p.side;
+    if (!strcmp(d->kind, "line")) side = (d->nsol - 1) % 2 == 0 ? WHITE : BLACK;
+    new_game(a, d->fen, side);
+    a->saved = true; /* drills aren't saved as games */
+    a->dstep = 0;
+    a->dfailed = a->dshow = a->drecorded = false;
+    const char *label = !strcmp(d->kind, "tactic") ? "Puzzle from your game"
+                      : !strcmp(d->kind, "punish") ? "Punish the blunder"
+                      : !strcmp(d->kind, "line") ? "Opening line" : "Endgame";
+    snprintf(a->banner, sizeof a->banner, "%s  ·  %d left%s\n%s", label,
+             a->drills.qn - a->drills.qpos + 1, d->seen ? "  ·  review" : "  ·  new", d->title);
+    if (!strcmp(d->kind, "endgame")) a->dstate = DS_PLAY;
+    else if (!strcmp(d->kind, "line") && side == BLACK) { a->dstate = DS_AUTO; a->dnext = a->now + 600; }
+    else a->dstate = DS_ASK;
+    say(a, MSG_INFO, "%s to move.", a->game.pos.side == WHITE ? "White" : "Black");
+}
+
+static void drill_session(App *a, const char *kind) {
+    char err[300];
+    drills_free(&a->drills);
+    if (!drills_load(&a->drills, a->base_dir, err, sizeof err)) { say(a, MSG_ERROR, "%s", err); return; }
+    if (drills_queue(&a->drills, kind) == 0) {
+        say(a, MSG_INFO, "Nothing due%s%s. Come back tomorrow, or try /drill all.", kind ? " for " : "", kind ? kind : "");
+        return;
+    }
+    a->dsess_n = a->dsess_ok = 0;
+    a->blind = false;
+    drill_next(a);
+}
+
+/* show the answer: back to the start and play the solution through */
+static void drill_show(App *a, const char *why) {
+    Drill *d = cur_drill(a);
+    a->dfailed = true;
+    drill_record(a, false);
+    char line[300] = "";
+    for (int i = 0; i < d->nsol; i++) {
+        strncat(line, d->sol[i], sizeof line - strlen(line) - 2);
+        strncat(line, " ", sizeof line - strlen(line) - 1);
+    }
+    new_game(a, d->fen, a->human);
+    a->saved = true;
+    a->dstep = 0;
+    a->dshow = true;
+    a->dstate = DS_AUTO;
+    a->dnext = a->now + 900;
+    say(a, MSG_ERROR, "%sThe answer: %s  ·  %s  ·  Enter for the next drill.", why ? why : "", line, d->info);
+}
+
+static void drill_user_move(App *a, Move m, const char *typed) {
+    Drill *d = cur_drill(a);
+    Move want;
+    bool is_line = !strcmp(d->kind, "line");
+    if (solution_move(a, a->dstep, &want) && move_eq(m, want)) {
+        game_push(&a->game, m);
+        after_move(a, m);
+        a->dstep++;
+        if (a->dstep >= d->nsol) { drill_finish(a, !a->dfailed, NULL); return; }
+        a->dstate = DS_AUTO;
+        a->dnext = a->now + 450;
+        if (!a->dfailed) a->msg[0] = 0;
+        return;
+    }
+    if (is_line) {
+        a->dfailed = true;
+        say(a, MSG_ERROR, "%s isn't your repertoire move. Here you play %s - type it to go on.", typed, d->sol[a->dstep]);
+        return;
+    }
+    /* a puzzle: an equally good move counts */
+    int ucp, bcp;
+    if (opp_eval_after(a->opp, &a->game.pos, m, 300000, &ucp) &&
+        opp_eval_after(a->opp, &a->game.pos, want, 300000, &bcp)) {
+        bool ok = bcp >= 9000 ? ucp >= 9000 : (ucp >= bcp - 60 || ucp >= 600);
+        if (ok) {
+            game_push(&a->game, m);
+            after_move(a, m);
+            char extra[160];
+            snprintf(extra, sizeof extra, "%s works too (the line was %s...). ", typed, d->sol[a->dstep]);
+            drill_finish(a, !a->dfailed, extra);
+            return;
+        }
+    }
+    char why[160];
+    snprintf(why, sizeof why, "Not %s. ", typed);
+    drill_show(a, why);
+}
+
+/* automatic moves: the opponent's replies, or replaying an answer */
+static void drill_tick(App *a) {
+    if (a->drill < 0 || a->dstate != DS_AUTO || a->now < a->dnext || a->animating) return;
+    Drill *d = cur_drill(a);
+    Move m;
+    if (!solution_move(a, a->dstep, &m)) { drill_finish(a, false, "(bad drill line) "); return; }
+    game_push(&a->game, m);
+    after_move(a, m);
+    a->dstep++;
+    if (a->dstep >= d->nsol) {
+        if (a->dshow) a->dstate = DS_DONE;
+        else drill_finish(a, !a->dfailed, NULL);
+    } else if (a->dshow) {
+        a->dnext = a->now + 900;
+    } else {
+        a->dstate = DS_ASK;
+    }
+}
+
 static const char *HELP =
     "Moves: standard notation - e4, Nf3, exd5, Nbd7, R1e2, O-O, e8=Q. Check signs optional "
     "(required in /strict). Up/Down recall earlier input.  "
     "/new [white|black] · /flip · /undo · /level 1-10 · /blind (hide pieces) · /peek (3 s look) · "
     "/coords (board labels) · /squares (30 s square-naming drill) · "
+    "/drill [puzzles|punish|lines|endgames] · /answer · /next · /play (leave drills) · "
     "/strict · /pgn (save) · /fen (copy) · /resign · /quit";
 
 static void next_square(App *a) {
@@ -131,6 +289,8 @@ static bool command(App *a, const char *line) {
     sscanf(line, "/%31s %63s", cmd, arg);
     if (!strcmp(cmd, "quit") || !strcmp(cmd, "q")) return false;
     if (!strcmp(cmd, "new") || !strcmp(cmd, "n")) {
+        a->drill = -1;
+        a->banner[0] = 0;
         int side = !strcmp(arg, "black") || !strcmp(arg, "b") ? BLACK
                    : !strcmp(arg, "white") || !strcmp(arg, "w") ? WHITE : a->human;
         new_game(a, NULL, side);
@@ -139,6 +299,7 @@ static bool command(App *a, const char *line) {
         a->flipped = !a->flipped;
         a->msg[0] = 0;
     } else if (!strcmp(cmd, "undo") || !strcmp(cmd, "u")) {
+        if (a->drill >= 0) { say(a, MSG_ERROR, "No take-backs in drills. /answer to see the solution."); return true; }
         opp_cancel(a->opp);
         if (a->game.nply == 0) { say(a, MSG_ERROR, "Nothing to take back."); return true; }
         game_pop(&a->game);
@@ -156,6 +317,19 @@ static bool command(App *a, const char *line) {
     } else if (!strcmp(cmd, "blind")) {
         a->blind = !a->blind;
         say(a, MSG_INFO, a->blind ? "Blindfold on. /peek shows the pieces for 3 seconds." : "Blindfold off.");
+    } else if (!strcmp(cmd, "drill") || !strcmp(cmd, "d")) {
+        drill_session(a, arg[0] ? arg : NULL);
+    } else if (!strcmp(cmd, "next")) {
+        if (a->drill < 0) { say(a, MSG_ERROR, "Not in a drill. /drill starts one."); return true; }
+        drill_next(a);
+    } else if (!strcmp(cmd, "answer") || !strcmp(cmd, "giveup")) {
+        Drill *d = cur_drill(a);
+        if (!d || a->dstate == DS_DONE) { say(a, MSG_ERROR, "No drill to give up."); return true; }
+        if (!strcmp(d->kind, "endgame")) { opp_cancel(a->opp); drill_finish(a, false, "Given up. "); }
+        else drill_show(a, NULL);
+    } else if (!strcmp(cmd, "play")) {
+        if (a->drill >= 0) { opp_cancel(a->opp); a->drill = -1; a->banner[0] = 0; new_game(a, NULL, a->human); }
+        say(a, MSG_INFO, "Free play.");
     } else if (!strcmp(cmd, "coords")) {
         a->coords = !a->coords;
         say(a, MSG_INFO, a->coords ? "Coordinates on." : "Coordinates off. /squares drills naming squares.");
@@ -202,12 +376,17 @@ static bool submit(App *a) {
     snprintf(line, sizeof line, "%s", a->input);
     a->input[0] = 0;
     a->input_len = 0;
-    if (!line[0]) return true;
+    if (!line[0]) {
+        if (a->drill >= 0 && a->dstate == DS_DONE) drill_next(a);
+        return true;
+    }
     if (a->nhist == 0 || strcmp(a->history[(a->nhist - 1) % HISTORY], line) != 0)
         snprintf(a->history[a->nhist++ % HISTORY], 64, "%s", line);
     a->hist_pos = a->nhist;
 
     if (line[0] == '/') return command(a, line);
+    if (a->drill >= 0 && a->dstate == DS_DONE) { say(a, MSG_INFO, "Press Enter for the next drill."); return true; }
+    if (a->drill >= 0 && a->dstate == DS_AUTO) { say(a, MSG_INFO, "Wait a moment..."); return true; }
     if (game_status(&a->game) != ST_ONGOING) { say(a, MSG_ERROR, "The game is over - /new to start another."); return true; }
     if (a->game.pos.side != a->human) { say(a, MSG_ERROR, "Not your move yet."); return true; }
 
@@ -217,6 +396,7 @@ static bool submit(App *a) {
     if (r == SAN_ERR) { say(a, MSG_ERROR, "%s - %s", line, why); return true; }
     if (r == SAN_OK_NOTE) say(a, MSG_NOTE, "%s", why);
     else a->msg[0] = 0;
+    if (a->drill >= 0 && a->dstate == DS_ASK) { drill_user_move(a, m, line); return true; }
     game_push(&a->game, m);
     after_move(a, m);
     return true;
@@ -239,6 +419,7 @@ int main(int argc, char **argv) {
     a->level = 3;
     a->human = WHITE;
     a->coords = true;
+    a->drill = -1;
     srand((unsigned)time(NULL));
     const char *fen = NULL, *moves = NULL, *shot = NULL;
     int shot_w = 1280, shot_h = 800;
@@ -288,6 +469,23 @@ int main(int argc, char **argv) {
             if (r == SAN_ERR) say(a, MSG_ERROR, "%s - %s", getenv("SHOT_TRY"), why);
             else if (r == SAN_OK_NOTE) say(a, MSG_NOTE, "%s", why);
         }
+        if (getenv("SHOT_SCRIPT")) {
+            /* test harness: ';'-separated inputs, time advanced after each */
+            char buf[4096];
+            snprintf(buf, sizeof buf, "%s", getenv("SHOT_SCRIPT"));
+            a->now = 100000;
+            char *save = NULL;
+            for (char *tok = strtok_r(buf, ";", &save); tok; tok = strtok_r(NULL, ";", &save)) {
+                snprintf(a->input, sizeof a->input, "%s", strcmp(tok, ".") ? tok : ""); /* "." = Enter */
+                a->input_len = (int)strlen(a->input);
+                submit(a);
+                for (int k = 0; k < 8; k++) { a->now += 1000; a->animating = false; drill_tick(a); }
+                char fen[100];
+                pos_to_fen(&a->game.pos, fen, sizeof fen);
+                printf("> %-10s | %s\n  msg: %s\n", tok, fen, a->msg);
+            }
+            if (a->banner[0]) printf("banner: %s\n", a->banner);
+        }
         cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, shot_w, shot_h);
         cairo_t *cr = cairo_create(s);
         render_frame(a, cr, shot_w, shot_h, 1.0);
@@ -323,7 +521,8 @@ int main(int argc, char **argv) {
 
     while (running) {
         a->now = SDL_GetTicks();
-        bool busy = a->animating || opp_busy(a->opp) || a->now < a->peek_until || a->sq_drill;
+        bool busy = a->animating || opp_busy(a->opp) || a->now < a->peek_until || a->sq_drill ||
+                    (a->drill >= 0 && a->dstate == DS_AUTO);
         if (a->sq_drill && a->now >= a->sq_end) { end_square_drill(a, true); }
         SDL_Event e;
         if (SDL_WaitEventTimeout(&e, busy ? 8 : 60)) {
@@ -383,8 +582,11 @@ int main(int argc, char **argv) {
             dirty = true;
         }
         GameStatus st = game_status(&a->game);
-        if (st == ST_ONGOING && a->game.pos.side != a->human && !opp_busy(a->opp) && !a->animating) {
-            opp_go(a->opp, &a->game, a->level);
+        drill_tick(a);
+        st = game_status(&a->game);
+        bool engine_plays = a->drill < 0 || a->dstate == DS_PLAY;
+        if (engine_plays && st == ST_ONGOING && a->game.pos.side != a->human && !opp_busy(a->opp) && !a->animating) {
+            opp_go(a->opp, &a->game, a->drill >= 0 ? LEVEL_MAX : a->level);
             dirty = true;
         }
         if (st != last_status) { dirty = true; last_status = st; }

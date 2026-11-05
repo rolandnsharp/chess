@@ -6,9 +6,11 @@
 #include <stdint.h>
 
 #include "chess.h"
+#include "drill.h"
 #include "engine.h"
 
 enum { MSG_INFO, MSG_NOTE, MSG_ERROR, MSG_GOOD };
+enum { DS_ASK = 1, DS_AUTO, DS_DONE, DS_PLAY };
 
 #define HISTORY 64
 
@@ -38,6 +40,18 @@ typedef struct {
     bool sq_drill;
     int sq_target, sq_score, sq_misses, sq_best;
     uint64_t sq_end, sq_flash; /* drill end; time of last wrong answer */
+
+    /* drills */
+    DrillSet drills;
+    int drill;          /* current drill, or -1 in free play */
+    int dstate;         /* DS_* */
+    int dstep;          /* next solution move */
+    bool dfailed;       /* got this drill wrong */
+    bool dshow;         /* replaying the answer */
+    bool drecorded;
+    uint64_t dnext;     /* when the next automatic move is played */
+    int dsess_n, dsess_ok;
+    char banner[512];   /* drill prompt, shown in the panel */
 
     bool saved; /* finished game written to games/ */
     char base_dir[1024];

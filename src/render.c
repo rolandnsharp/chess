@@ -303,8 +303,22 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
     opp_name(a->opp, a->level, opp, sizeof opp);
     snprintf(line, sizeof line, "You play %s against %s%s%s", a->human == WHITE ? "White" : "Black", opp,
              a->blind ? "  ·  blindfold" : "", a->strict ? "  ·  strict" : "");
-    cy += text_height(cr, line, "DejaVu Sans 13px", cw) + 0;
-    text(cr, line, "DejaVu Sans 13px", cx, cy - text_height(cr, line, "DejaVu Sans 13px", cw), C_MUTED, LEFT, cw);
+    if (a->banner[0]) {
+        /* drill: first line is the label, the rest the prompt */
+        char head[160];
+        const char *nl = strchr(a->banner, '\n');
+        size_t hl = nl ? (size_t)(nl - a->banner) : strlen(a->banner);
+        snprintf(head, sizeof head, "%.*s", (int)(hl < sizeof head - 1 ? hl : sizeof head - 1), a->banner);
+        text(cr, head, "DejaVu Sans Bold 13px", cx, cy, C_ACCENT, LEFT, cw);
+        cy += text_height(cr, head, "DejaVu Sans Bold 13px", cw) + 6;
+        if (nl) {
+            text(cr, nl + 1, "DejaVu Sans 15px", cx, cy, C_TEXT, LEFT, cw);
+            cy += text_height(cr, nl + 1, "DejaVu Sans 15px", cw);
+        }
+    } else {
+        text(cr, line, "DejaVu Sans 13px", cx, cy, C_MUTED, LEFT, cw);
+        cy += text_height(cr, line, "DejaVu Sans 13px", cw);
+    }
     cy += 14;
     cairo_set_source_rgba(cr, 1, 1, 1, 0.07);
     cairo_rectangle(cr, cx, cy, cw, 1);
@@ -324,7 +338,8 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
     set(cr, C_INPUT);
     rounded(cr, cx, by, cw, ih, 10);
     cairo_fill_preserve(cr);
-    bool your_turn = a->game.pos.side == a->human && game_status(&a->game) == ST_ONGOING;
+    bool your_turn = a->game.pos.side == a->human && game_status(&a->game) == ST_ONGOING &&
+                     (a->drill < 0 || a->dstate == DS_ASK || a->dstate == DS_PLAY);
     if (your_turn) set(cr, HEX(0xe3b04b, 0.65));
     else cairo_set_source_rgba(cr, 1, 1, 1, 0.08);
     cairo_set_line_width(cr, 1.5);
@@ -355,6 +370,12 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
         uint64_t left = a->sq_end > a->now ? a->sq_end - a->now : 0;
         snprintf(status, sizeof status, "Name the square  ·  %d right  ·  %llu s left", a->sq_score,
                  (unsigned long long)((left + 999) / 1000));
+    } else if (a->drill >= 0 && a->dstate == DS_DONE) {
+        snprintf(status, sizeof status, "Press Enter for the next drill");
+    } else if (a->drill >= 0 && a->dstate == DS_AUTO) {
+        snprintf(status, sizeof status, a->dshow ? "Showing the answer…" : "Opponent replies…");
+    } else if (a->drill >= 0 && a->dstate == DS_ASK) {
+        snprintf(status, sizeof status, "Your move  ·  %s", a->game.pos.side == WHITE ? "White" : "Black");
     } else if (st != ST_ONGOING) {
         const char *res = game_result(&a->game);
         snprintf(status, sizeof status, "%s  ·  %s", status_text(st), res);
@@ -374,7 +395,7 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
     const Game *g = &a->game;
     bool black_first = g->start.side == BLACK;
     int total_cells = g->nply + (black_first ? 1 : 0);
-    int nrows = (total_cells + 1) / 2;
+    int nrows = g->nply ? (total_cells + 1) / 2 : 0;
     int first = nrows > nrows_fit ? nrows - nrows_fit : 0;
     if (g->nply == 0) {
         text(cr, a->blind ? "Moves appear here. The pieces don't." : "Moves appear here.",
@@ -422,6 +443,7 @@ void render_frame(App *a, cairo_t *cr, double w, double h, double scale) {
 
     char opp[96];
     opp_name(a->opp, a->level, opp, sizeof opp);
+    if (a->drill >= 0) snprintf(opp, sizeof opp, "%s", a->dstate == DS_PLAY ? "Stockfish (full strength)" : "Opponent");
     int top_color = a->flipped ? WHITE : BLACK;
     const char *top_name = top_color == a->human ? "You" : opp;
     const char *bot_name = top_color == a->human ? opp : "You";
