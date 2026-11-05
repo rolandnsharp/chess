@@ -8,6 +8,7 @@
 #include "chess.h"
 #include "drill.h"
 #include "puzzles.h"
+#include "review.h"
 #include "engine.h"
 
 enum { MSG_INFO, MSG_NOTE, MSG_ERROR, MSG_GOOD };
@@ -16,6 +17,14 @@ enum { SC_OFF = 0, SC_ASK, SC_RESULT };
 
 enum { TH_OFF = 0, TH_ASK, TH_RESULT };
 enum { TW_NONE = 0, TW_BEGIN, TW_AGAIN, TW_FINISHED };
+enum { RV_OFF = 0, RV_SELF, RV_SHOWN };
+
+typedef struct {
+    int ply;       /* index of your move that you think was wrong */
+    Move m;        /* what you'd play instead */
+    char tag[12];  /* why: hung, threat, capture, calc, plan, time, other */
+} ReviewMark;
+#define RV_MARKS 3
 
 #define SCAN_MAX 64
 #define ARROWS_MAX 16
@@ -100,6 +109,14 @@ typedef struct {
     char lp_theme[64];
     Drill lp_drill;
     double lp_rating_start;
+
+    /* self-review */
+    int review;            /* RV_* */
+    ReviewSet rv;
+    int rv_cur, rv_ply;
+    ReviewMark rv_mark[RV_MARKS];
+    int rv_nmarks, rv_found, rv_total;
+    bool rv_mistake[RV_MAX_PLY];
 
     /* threat spotting */
     int threat;            /* TH_* */

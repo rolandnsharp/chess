@@ -29,6 +29,7 @@ built-in engine; with it, levels 1–9 are Elo 1320–2920 and 10 is full streng
 | `/answer`, `/next`, `/play` | give up and see the answer, skip, leave drills |
 | `/train` (or `./chess train`) | today's guided session from your plan; `/skip` a step, `/stop` |
 | `/puzzles [themes]` | lichess puzzles near your level (e.g. `fork`, `defence,quiet`); tracks a puzzle rating |
+| `/review [win\|loss\|last]` | review one of your games yourself first (←/→ to step, type `Nd2 threat` at a move you'd change), then `/engine` |
 | `/threats` | what does your opponent's last move threaten? type it, or `none` |
 | `/scan [captures\|checks]` | type every check and capture, yours then your opponent's; scored against the legal-move list |
 | `/flip`, `/fen`, `/pgn`, `/resign`, `/help`, `/quit` | |
@@ -45,7 +46,7 @@ king would be in check, pawn captures need their file, and so on.
     .venv/bin/python analysis/analyse.py --games 1000   # Stockfish over your recent games (resumable)
     .venv/bin/python analysis/threats.py               # threat-spotting positions
     .venv/bin/python analysis/report.py                 # data/analysis/report.md + drills.tsv
-    make review                                         # all of the above, after fetching new games
+    make update                                         # all of the above, after fetching new games
 
 Games are read from `data/chesscom/all.pgn` and `data/lichess/all.pgn`; set the
 player names in `ME` in `analysis/analyse.py`. Four kinds of drill:
@@ -79,7 +80,7 @@ day and then on a spaced schedule. The puzzle database is CC0, from lichess.org.
 `/train` walks through `data/plan.txt` step by step (falls back to
 `plans/default.txt`), then logs each step's result to `data/train_log.tsv`.
 The plan is meant to be rewritten by a coach (Claude, see `CLAUDE.md`) after
-`make review` fetches and analyses your newest games.
+`make update` fetches and analyses your newest games.
 
 ## Layout
 

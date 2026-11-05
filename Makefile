@@ -5,7 +5,7 @@ GUI_CFLAGS = $(shell pkg-config --cflags $(PKGS))
 GUI_LIBS   = $(shell pkg-config --libs $(PKGS)) -lpthread -lm
 
 CORE = src/chess.c
-APP  = src/main.c src/render.c src/engine.c src/ai.c src/drill.c src/puzzles.c
+APP  = src/main.c src/render.c src/engine.c src/ai.c src/drill.c src/puzzles.c src/review.c
 
 all: chess test_chess
 
@@ -28,7 +28,7 @@ stockfish:
 PY = .venv/bin/python
 
 # fetch new games, analyse the newest, rebuild drills and report
-review:
+update:
 	$(PY) analysis/fetch.py
 	$(PY) analysis/analyse.py --games 300 --nodes 25000 --procs 4
 	$(PY) analysis/threats.py --procs 4
@@ -38,4 +38,4 @@ review:
 clean:
 	rm -f chess test_chess
 
-.PHONY: all test clean stockfish review
+.PHONY: all test clean stockfish update

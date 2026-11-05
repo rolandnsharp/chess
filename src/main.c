@@ -554,6 +554,7 @@ static void leave_modes(App *a) {
     a->threat = TH_OFF;
     a->sq_drill = false;
     a->lichess = false;
+    a->review = RV_OFF;
     a->narrows = 0;
     a->banner[0] = 0;
     a->dstate = 0;
@@ -708,6 +709,7 @@ static void threat_start(App *a) {
 
 static void sq_start(App *a);
 static void train_end_step(App *a);
+static void review_start(App *a, const char *arg);
 static void drill_session(App *a, const char *kind);
 static void scan_start_session(App *a, const char *arg);
 
@@ -745,7 +747,7 @@ static void plan_parse(App *a, const char *text) {
         int n = sscanf(line, "%15s %d %31s", s->kind, &s->count, s->arg);
         if (n < 2 || s->count <= 0) continue;
         if (strcmp(s->kind, "squares") && strcmp(s->kind, "scan") && strcmp(s->kind, "threats") &&
-            strcmp(s->kind, "drill") && strcmp(s->kind, "play") && strcmp(s->kind, "puzzles"))
+            strcmp(s->kind, "drill") && strcmp(s->kind, "play") && strcmp(s->kind, "puzzles") && strcmp(s->kind, "review"))
             continue;
         a->plan_n++;
     }
@@ -781,7 +783,9 @@ static void step_label(const TrainStep *s, char *out, size_t n) {
                       : !strncmp(s->arg, "line", 4) || !strncmp(s->arg, "open", 4) ? "Your opening lines"
                       : !strncmp(s->arg, "end", 3) ? "Endgames you let slip" : "Drills";
         snprintf(out, n, "%s: %d", w, s->count);
-    } else if (!strcmp(s->kind, "puzzles")) snprintf(out, n, "Lichess puzzles: %d%s%s", s->count,
+    } else if (!strcmp(s->kind, "review")) snprintf(out, n, "Review %d of your games yourself, then see the engine%s%s",
+                                                    s->count, s->arg[0] ? ": " : "", s->arg);
+    else if (!strcmp(s->kind, "puzzles")) snprintf(out, n, "Lichess puzzles: %d%s%s", s->count,
                                                      s->arg[0] ? ", " : "", s->arg);
     else if (!strcmp(s->kind, "play")) snprintf(out, n, "Play %d game%s against Stockfish%s%s", s->count,
                                                   s->count > 1 ? "s" : "", s->arg[0] ? " " : "", s->arg);
@@ -818,6 +822,7 @@ static void train_begin_step(App *a) {
     else if (!strcmp(s->kind, "threats")) threat_start(a);
     else if (!strcmp(s->kind, "drill")) drill_session(a, s->arg[0] ? s->arg : NULL);
     else if (!strcmp(s->kind, "puzzles")) lichess_session(a, s->arg);
+    else if (!strcmp(s->kind, "review")) review_start(a, s->arg);
     else if (!strcmp(s->kind, "play")) {
         leave_modes(a);
         int lv = atoi(s->arg + (strncmp(s->arg, "level=", 6) ? 0 : 6));
@@ -826,7 +831,7 @@ static void train_begin_step(App *a) {
         say(a, MSG_INFO, "Play it out. Before every move: what did their last move attack?");
     }
     /* a step with nothing to do (no drills due, no positions) is skipped */
-    bool running = a->sq_drill || a->scan || a->threat || a->drill >= 0 || !strcmp(s->kind, "play");
+    bool running = a->sq_drill || a->scan || a->threat || a->review || a->drill >= 0 || !strcmp(s->kind, "play");
     if (!running) {
         snprintf(s->summary, sizeof s->summary, "skipped (%s)", a->msg);
         train_end_step(a);
@@ -848,6 +853,8 @@ static void train_end_step(App *a) {
             snprintf(s->summary, sizeof s->summary, "spotted %d of %d threats", a->th_sess_ok, a->th_sess_n);
         else if (!strcmp(s->kind, "drill"))
             snprintf(s->summary, sizeof s->summary, "%d of %d right first time", a->dsess_ok, a->dsess_n);
+        else if (!strcmp(s->kind, "review"))
+            snprintf(s->summary, sizeof s->summary, "found %d of %d mistakes yourself", a->rv_found, a->rv_total);
         else if (!strcmp(s->kind, "puzzles"))
             snprintf(s->summary, sizeof s->summary, "%d of %d solved, puzzle rating %.0f -> %.0f", a->dsess_ok,
                      a->dsess_n, a->lp_rating_start, a->lp.rating);
@@ -912,6 +919,209 @@ static void train_stop(App *a) {
     say(a, MSG_INFO, "Training stopped. /train to start again.");
 }
 
+
+/* ---------------------------------------------------------- self-review */
+
+static const char *RV_TAGS[] = {"hung", "threat", "capture", "calc", "plan", "time", "other"};
+
+static ReviewGame *rv_game(App *a) { return &a->rv.g[a->rv_cur]; }
+
+static bool rv_my_ply(App *a, int ply) { return (ply % 2 == 0) == rv_game(a)->me_white; }
+
+/* your winning chances before ply i */
+static double rv_wp(App *a, int i) {
+    ReviewGame *g = rv_game(a);
+    return review_wp(g->me_white ? g->eval[i] : -g->eval[i]);
+}
+
+static void rv_arrows(App *a) {
+    ReviewGame *g = rv_game(a);
+    a->narrows = 0;
+    int i = a->rv_ply;
+    if (i >= g->n || !rv_my_ply(a, i)) return;
+    char why[256];
+    for (int k = 0; k < a->rv_nmarks; k++)
+        if (a->rv_mark[k].ply == i) { a->arrows[a->narrows] = a->rv_mark[k].m; a->arrow_col[a->narrows++] = 2; }
+    if (a->review == RV_SHOWN && a->rv_mistake[i]) {
+        Move m;
+        if (san_parse(&a->game.pos, g->san[i], false, &m, why, sizeof why) != SAN_ERR) {
+            a->arrows[a->narrows] = m; a->arrow_col[a->narrows++] = 1;
+        }
+        if (strcmp(g->best[i], "-") && san_parse(&a->game.pos, g->best[i], false, &m, why, sizeof why) != SAN_ERR) {
+            a->arrows[a->narrows] = m; a->arrow_col[a->narrows++] = 0;
+        }
+    }
+}
+
+static void rv_goto(App *a, int ply) {
+    ReviewGame *g = rv_game(a);
+    if (ply < 0) ply = 0;
+    if (ply > g->n) ply = g->n;
+    int me = g->me_white ? WHITE : BLACK;
+    game_init(&a->game, NULL);
+    a->human = me;
+    a->saved = true;
+    char why[256];
+    for (int i = 0; i < ply; i++) {
+        Move m;
+        if (san_parse(&a->game.pos, g->san[i], false, &m, why, sizeof why) == SAN_ERR) { ply = i; break; }
+        game_push(&a->game, m);
+        if (i == ply - 1) { a->animating = true; a->anim_move = m; a->anim_start = a->now; }
+    }
+    a->rv_ply = ply;
+    rv_arrows(a);
+}
+
+static void rv_banner(App *a) {
+    ReviewGame *g = rv_game(a);
+    double sc = review_score(g);
+    const char *res = sc == 1 ? "won" : sc == 0 ? "lost" : "drew";
+    int len = snprintf(a->banner, sizeof a->banner, "Self-review  ·  %s %s  ·  you %s as %s vs %s\n", g->date, g->speed,
+                       res, g->me_white ? "White" : "Black", g->me_white ? g->black : g->white);
+    if (a->review == RV_SELF)
+        snprintf(a->banner + len, sizeof a->banner - (size_t)len,
+                 "Engine hidden. Step through with the arrow keys (or Enter). At one of your moves you "
+                 "think was wrong, type the better move and why, e.g. Nd2 threat. Why: hung, threat, "
+                 "capture, calc, plan, time. Up to 3. Then /engine.");
+}
+
+static void review_open(App *a, int idx) {
+    leave_modes(a);
+    a->rv_cur = idx;
+    a->review = RV_SELF;
+    a->rv_nmarks = a->rv_found = a->rv_total = 0;
+    memset(a->rv_mark, 0, sizeof a->rv_mark);
+    memset(a->rv_mistake, 0, sizeof a->rv_mistake);
+    a->blind = false;
+    a->flipped = !rv_game(a)->me_white;
+    rv_goto(a, 0);
+    a->flipped = !rv_game(a)->me_white;
+    rv_banner(a);
+    say(a, MSG_INFO, "%s", rv_game(a)->opening);
+}
+
+static void review_start(App *a, const char *arg) {
+    char err[300];
+    if (!a->rv.n && !reviews_load(&a->rv, a->base_dir, err, sizeof err)) { say(a, MSG_ERROR, "%s", err); return; }
+    int pick = -1;
+    if (!strcmp(arg, "last")) pick = 0;
+    for (int i = 0; i < a->rv.n && pick < 0; i++) {
+        ReviewGame *g = &a->rv.g[i];
+        if (g->reviewed) continue;
+        double sc = review_score(g);
+        if (!strcmp(arg, "win") && sc != 1) continue;
+        if (!strcmp(arg, "loss") && sc != 0) continue;
+        pick = i;
+    }
+    if (pick < 0) { say(a, MSG_INFO, "No unreviewed games%s%s. Try /review last.", arg[0] ? " of that kind: " : "", arg); return; }
+    review_open(a, pick);
+}
+
+static void review_mark(App *a, const char *line) {
+    ReviewGame *g = rv_game(a);
+    int i = a->rv_ply;
+    if (i >= g->n) { say(a, MSG_ERROR, "That's the end of the game. Go back to one of your moves."); return; }
+    if (!rv_my_ply(a, i)) { say(a, MSG_ERROR, "It's your opponent's move here - step to one of yours (the position before you moved)."); return; }
+    char mv[32] = "", tag[32] = "other";
+    sscanf(line, "%31s %31s", mv, tag);
+    bool tag_ok = false;
+    for (size_t k = 0; k < sizeof RV_TAGS / sizeof RV_TAGS[0]; k++) if (!strcmp(tag, RV_TAGS[k])) tag_ok = true;
+    if (!tag_ok) { say(a, MSG_ERROR, "Why '%s'? Use one of: hung, threat, capture, calc, plan, time, other.", tag); return; }
+    Move m;
+    char why[256];
+    if (san_parse(&a->game.pos, mv, false, &m, why, sizeof why) == SAN_ERR) { say(a, MSG_ERROR, "%s - %s", mv, why); return; }
+    char san[16];
+    move_to_san(&a->game.pos, m, san, sizeof san);
+    char a1[16], b1[16];
+    snprintf(a1, sizeof a1, "%s", san); snprintf(b1, sizeof b1, "%s", g->san[i]);
+    a1[strcspn(a1, "+#")] = 0; b1[strcspn(b1, "+#")] = 0;
+    if (!strcmp(a1, b1)) { say(a, MSG_ERROR, "%s is what you played. Type the move you think you should have played instead.", san); return; }
+    int slot = -1;
+    for (int k = 0; k < a->rv_nmarks; k++) if (a->rv_mark[k].ply == i) slot = k;
+    if (slot < 0) {
+        if (a->rv_nmarks >= RV_MARKS) { say(a, MSG_ERROR, "That's 3 marks already - /engine to compare, or /unmark."); return; }
+        slot = a->rv_nmarks++;
+    }
+    a->rv_mark[slot].ply = i;
+    a->rv_mark[slot].m = m;
+    snprintf(a->rv_mark[slot].tag, sizeof a->rv_mark[0].tag, "%s", tag);
+    rv_arrows(a);
+    say(a, MSG_GOOD, "Marked move %d: you played %s; better %s (%s). %d of %d marks - /engine when you're done.",
+        i / 2 + 1, g->san[i], san, tag, a->rv_nmarks, RV_MARKS);
+}
+
+static void review_log(App *a) {
+    FILE *f = fopen(a->rv.log_path, "a");
+    if (!f) return;
+    ReviewGame *g = rv_game(a);
+    time_t t = time(NULL);
+    char stamp[32];
+    strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M", localtime(&t));
+    fprintf(f, "%s\t%s\t%s\t%d\t%d\t%d\t", stamp, g->id, g->result, a->rv_nmarks, a->rv_found, a->rv_total);
+    for (int k = 0; k < a->rv_nmarks; k++) {
+        char u[8];
+        move_to_uci(a->rv_mark[k].m, u);
+        fprintf(f, "%s%d:%s:%s", k ? ";" : "", a->rv_mark[k].ply, u, a->rv_mark[k].tag);
+    }
+    fprintf(f, "\n");
+    fclose(f);
+    g->reviewed = true;
+}
+
+static void review_reveal(App *a) {
+    ReviewGame *g = rv_game(a);
+    a->review = RV_SHOWN;
+    a->rv_total = a->rv_found = 0;
+    for (int i = 0; i < g->n; i++) {
+        a->rv_mistake[i] = rv_my_ply(a, i) && rv_wp(a, i) - rv_wp(a, i + 1) >= 0.2;
+        a->rv_total += a->rv_mistake[i];
+    }
+    char out[1200] = "";
+    size_t len = 0;
+    #define OUT(...) do { if (len < sizeof out) len += (size_t)snprintf(out + len, sizeof out - len, __VA_ARGS__); } while (0)
+    char why[256];
+    for (int k = 0; k < a->rv_nmarks; k++) {
+        ReviewMark *mk = &a->rv_mark[k];
+        int i = mk->ply;
+        rv_goto(a, i);
+        char mine[16];
+        move_to_san(&a->game.pos, mk->m, mine, sizeof mine);
+        double played = rv_wp(a, i + 1), best = rv_wp(a, i);
+        if (a->rv_mistake[i]) { a->rv_found++; OUT("✓ Move %d %s was a mistake (%.0f%% → %.0f%%). ", i / 2 + 1, g->san[i], 100 * best, 100 * played); }
+        else OUT("· Move %d %s was fine by the engine (%.0f%% → %.0f%%). ", i / 2 + 1, g->san[i], 100 * best, 100 * played);
+        char b[16], m2[16];
+        snprintf(b, sizeof b, "%s", g->best[i]); snprintf(m2, sizeof m2, "%s", mine);
+        b[strcspn(b, "+#")] = 0; m2[strcspn(m2, "+#")] = 0;
+        int cp;
+        if (!strcmp(b, m2)) OUT("Your %s is the engine's move.\n", mine);
+        else if (opp_eval_after(a->opp, &a->game.pos, mk->m, 200000, &cp))
+            OUT("Your %s: %.0f%%; engine's %s: %.0f%%.\n", mine, 100 * review_wp(cp), g->best[i], 100 * best);
+        else OUT("Engine preferred %s.\n", g->best[i]);
+    }
+    int missed = 0, first_missed = -1;
+    for (int i = 0; i < g->n; i++) {
+        if (!a->rv_mistake[i]) continue;
+        bool marked = false;
+        for (int k = 0; k < a->rv_nmarks; k++) if (a->rv_mark[k].ply == i) marked = true;
+        if (marked) continue;
+        if (first_missed < 0) first_missed = i;
+        if (missed++ < 4)
+            OUT("✗ Not spotted: move %d %s (%.0f%% → %.0f%%) - best %s.\n", i / 2 + 1, g->san[i],
+                100 * rv_wp(a, i), 100 * rv_wp(a, i + 1), g->best[i]);
+    }
+    if (!a->rv_total) OUT("The engine found no big mistakes of yours in this game.\n");
+    #undef OUT
+    (void)why;
+    int hl = snprintf(a->banner, sizeof a->banner, "Self-review  ·  engine verdict\n");
+    snprintf(a->banner + hl, sizeof a->banner - (size_t)hl, "%s", out);
+    review_log(a);
+    train_item(a);
+    rv_goto(a, first_missed >= 0 ? first_missed : a->rv_nmarks ? a->rv_mark[0].ply : a->rv_ply);
+    say(a, a->rv_found == a->rv_total && a->rv_total ? MSG_GOOD : MSG_INFO,
+        "You found %d of the %d mistakes the engine sees. Arrows: red played, green best, orange yours. "
+        "%s", a->rv_found, a->rv_total, a->training ? "Enter to continue." : "/review for another game.");
+}
+
 static const char *HELP =
     "Moves: standard notation - e4, Nf3, exd5, Nbd7, R1e2, O-O, e8=Q. Check signs optional "
     "(required in /strict). Up/Down recall earlier input.  "
@@ -920,6 +1130,7 @@ static const char *HELP =
     "/drill [puzzles|punish|lines|endgames] · /answer · /next · /play (leave drills) · "
     "/scan [captures|checks] (list every check and capture) · /threats (what does their move threaten?) · "
     "/train (today's guided session) · /skip · /stop · /puzzles [themes] (lichess, at your level) · "
+    "/review [win|loss|last] (analyse a game yourself, then /engine) · "
     "/strict · /pgn (save) · /fen (copy) · /resign · /quit";
 
 static void next_square(App *a) {
@@ -1025,6 +1236,13 @@ static bool command(App *a, const char *line) {
     } else if (!strcmp(cmd, "stop")) {
         if (a->training) train_stop(a);
         else { leave_modes(a); new_game(a, NULL, a->pref_side); say(a, MSG_INFO, "Stopped."); }
+    } else if (!strcmp(cmd, "review") || !strcmp(cmd, "rv")) {
+        review_start(a, arg);
+    } else if (!strcmp(cmd, "engine") || !strcmp(cmd, "reveal")) {
+        if (a->review != RV_SELF) { say(a, MSG_ERROR, "Start a self-review first: /review."); return true; }
+        review_reveal(a);
+    } else if (!strcmp(cmd, "unmark")) {
+        if (a->review == RV_SELF && a->rv_nmarks) { a->rv_nmarks--; rv_arrows(a); say(a, MSG_INFO, "Last mark removed."); }
     } else if (!strcmp(cmd, "puzzles") || !strcmp(cmd, "pz")) {
         lichess_session(a, arg);
     } else if (!strcmp(cmd, "threats") || !strcmp(cmd, "threat")) {
@@ -1094,6 +1312,8 @@ static bool submit(App *a) {
         if (a->twait == TW_BEGIN) train_begin_step(a);
         else if (a->twait == TW_AGAIN) { a->twait = TW_NONE; sq_start(a); }
         else if (a->twait == TW_FINISHED) { a->training = false; a->twait = TW_NONE; a->banner[0] = 0; say(a, MSG_INFO, "Free play."); }
+        else if (a->review == RV_SELF) rv_goto(a, a->rv_ply + 1);
+        else if (a->review == RV_SHOWN) { if (!train_step_full(a)) rv_goto(a, a->rv_ply + 1); }
         else if (a->scan == SC_ASK) scan_finish_phase(a);
         else if (a->scan == SC_RESULT) scan_continue(a);
         else if (a->threat == TH_RESULT) { if (!train_step_full(a)) threat_next(a); }
@@ -1112,6 +1332,8 @@ static bool submit(App *a) {
     if (a->twait == TW_BEGIN || a->twait == TW_AGAIN) { say(a, MSG_INFO, "Press Enter to start."); return true; }
     if (a->scan == SC_ASK) { scan_input(a, line); return true; }
     if (a->threat == TH_ASK) { threat_input(a, line); return true; }
+    if (a->review == RV_SELF) { review_mark(a, line); return true; }
+    if (a->review == RV_SHOWN) { say(a, MSG_INFO, "Arrow keys to look around; /review for another game."); return true; }
     if (a->threat == TH_RESULT) { say(a, MSG_INFO, "Press Enter for the next one."); return true; }
     if (a->scan == SC_RESULT) { say(a, MSG_INFO, "Press Enter for the next one, or /play to stop."); return true; }
     if (a->drill >= 0 && a->dstate == DS_DONE) { say(a, MSG_INFO, "Press Enter for the next drill."); return true; }
@@ -1282,6 +1504,10 @@ int main(int argc, char **argv) {
                         else if (a->input_len) a->input_len--;
                         a->input[a->input_len] = 0;
                         break;
+                    case SDLK_LEFT: if (a->review) rv_goto(a, a->rv_ply - 1); break;
+                    case SDLK_RIGHT: if (a->review) rv_goto(a, a->rv_ply + 1); break;
+                    case SDLK_HOME: if (a->review) rv_goto(a, 0); break;
+                    case SDLK_END: if (a->review) rv_goto(a, rv_game(a)->n); break;
                     case SDLK_ESCAPE:
                         if (a->sq_drill && a->input_len == 0) end_square_drill(a, false);
                         a->input_len = 0; a->input[0] = 0;
@@ -1317,7 +1543,7 @@ int main(int argc, char **argv) {
         GameStatus st = game_status(&a->game);
         drill_tick(a);
         st = game_status(&a->game);
-        bool engine_plays = (a->drill < 0 || a->dstate == DS_PLAY) && !a->scan && !a->threat &&
+        bool engine_plays = (a->drill < 0 || a->dstate == DS_PLAY) && !a->scan && !a->threat && !a->review &&
                             !a->sq_drill && (a->twait == TW_NONE || !a->training);
         if (engine_plays && st == ST_ONGOING && a->game.pos.side != a->human && !opp_busy(a->opp) && !a->animating) {
             opp_go(a->opp, &a->game, a->drill >= 0 ? LEVEL_MAX : a->level);

@@ -13,13 +13,15 @@ C chess trainer: every move is typed in standard notation (SAN). The player is
 
 ## Coaching loop ("review my games", "update my plan")
 
-1. `make review` — fetches new games, Stockfish-analyses the newest 300 (cached), finds
+1. `make update` — fetches new games, Stockfish-analyses the newest 300 (cached), finds
    threats, rewrites `data/analysis/report.md` and the drill files in `data/analysis/drills/`.
 2. Read `data/analysis/report.md` and the practice logs:
    - `data/train_log.tsv` — one line per /train step: date, step, planned, done, result
    - `data/scan_log.tsv` — checks & captures: found/total, wrong entries, seconds
    - `data/threat_log.tsv` — threat spotting: answer, guess, right?, seconds
    - `data/progress.tsv` — spaced-repetition boxes per drill
+   - `data/review_log.tsv` — self-reviews: game, marks, mistakes found / engine total, marks (ply:uci:why)
+   - `data/puzzle_progress.tsv` — lichess puzzle rating and missed puzzles
 3. Rewrite `data/plan.txt` (format in `plans/default.txt`). Put the reasons in `note`
    lines, with the numbers they come from, and date the header. Weight steps toward
    what the newest games and logs show; drop what is fixed. Keep a session ~20 min.

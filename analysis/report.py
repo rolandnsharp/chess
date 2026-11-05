@@ -211,6 +211,29 @@ def write_scan(games):
     return len(blunder), len(rows)
 
 
+def write_games(games, n=200):
+    """Newest games for the self-review feature. One line each: id, date,
+    speed, white, black, me_white, result, opening, link, SANs (space
+    separated), White-relative evals before/after each ply (n+1, comma
+    separated), engine best SAN per ply ('-' if none)."""
+    clean = lambda x: str(x).replace("\t", " ").replace("\n", " ")
+    rows = []
+    for g in games[-n:]:
+        plies = g["plies"]
+        if len(plies) < 10:
+            continue
+        evals = [plies[0]["eval"]] + [p["eval_after"] for p in plies]
+        rows.append((g["id"], g["stamp"][:16], g["speed"], g["white"], g["black"], int(g["me_white"]),
+                     g["result"], g["opening"].replace("-", " "), g["link"],
+                     " ".join(p["san"] for p in plies), ",".join(str(e) for e in evals),
+                     " ".join(p["best_san"] or "-" for p in plies)))
+    with open(os.path.join(OUT, "drills", "games.tsv"), "w") as f:
+        f.write("# id\tdate\tspeed\twhite\tblack\tme_white\tresult\topening\tlink\tsans\tevals\tbest\n")
+        for r in reversed(rows):  # newest first
+            f.write("\t".join(clean(x) for x in r) + "\n")
+    return len(rows)
+
+
 def main():
     games = [json.load(open(f)) for f in glob.glob(os.path.join(GAMES, "*.json"))]
     games.sort(key=lambda g: g["stamp"])
@@ -397,6 +420,7 @@ def main():
           f"{sum(1 for l in ls if l['fixed'])} include a correction to what you usually play.\n")
     write_tsv(tactics, unpunished, lines_out, thrown)
     nb, ns = write_scan(games)
+    write_games(games)
     w(f"Checks-and-captures positions: {ns} ({nb} from just before one of your blunders).\n")
     open(os.path.join(OUT, "report.md"), "w").write("\n".join(lines) + "\n")
     print("\n".join(lines))

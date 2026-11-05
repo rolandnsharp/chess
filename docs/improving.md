@@ -132,21 +132,19 @@ science filling the gaps. Treat each method as an experiment on your own results
 | Defensive puzzles and red herrings | Defensive-move and quiet-move puzzles can be targeted (`/puzzles defence,quiet`). About one threat-spotting position in six has no threat |
 | Mixing problem types | A `/train` session moves between drill types; lichess puzzles mix themes unless filtered |
 | Openings matter little | Opening work is limited to your own lines, and only where your usual move costs you |
-| Game review is the most efficient study | `make review` plus Claude's report; still to add: self-review prompts before the engine (see below) |
+| Game review is the most efficient study | `/review`: mark your own mistakes first (with the better move and why), then `/engine` scores you against Stockfish; wins included (`/review win`) |
 | More thinking time | A training rule rather than a feature: play rated games at 15+10 or slower |
 
 ## Not built yet, ranked by expected value
 
-1. **Self-review before the engine.** After each rated game, mark where you think it
-   went wrong and why, then see the engine's verdict. Review some wins too.
-2. **A pre-move checklist and clock coaching in practice games.** Warn when a move was
+1. **A pre-move checklist and clock coaching in practice games.** Warn when a move was
    played in under 2 seconds in a non-forced position.
-3. **A Woodpecker set:** a fixed set of 200–400 basic-motif puzzles, solved in cycles,
+2. **A Woodpecker set:** a fixed set of 200–400 basic-motif puzzles, solved in cycles,
    aiming to halve the total time each cycle.
 
 ## Measuring
 
 Rating is noisy. The trainer's main measure is **engine-measured blunders per 100
-moves at a fixed time control**, tracked weekly by `make review`, plus the practice
+moves at a fixed time control**, tracked weekly by `make update`, plus the practice
 logs (scan hit rate and time, threat-spotting rate, puzzle rating). Every change to
 the plan is judged against your own previous numbers.

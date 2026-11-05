@@ -323,6 +323,53 @@ static void draw_player(App *a, cairo_t *cr, int color, const char *name, double
     }
 }
 
+/* your winning chances through the game, shown after the engine reveal:
+ * red dots are mistakes, orange ticks your marks, the line where you are */
+static double draw_eval_graph(App *a, cairo_t *cr, double x, double y, double w) {
+    const ReviewGame *g = &a->rv.g[a->rv_cur];
+    double h = 78;
+    set(cr, C_INPUT);
+    rounded(cr, x, y, w, h, 8);
+    cairo_fill(cr);
+    double px = x + 8, pw = w - 16, py = y + 6, ph = h - 12;
+    int n = g->n;
+    if (n < 1) return h;
+    #define GX(i) (px + pw * (i) / n)
+    #define GY(i) (py + ph * (1 - review_wp(g->me_white ? g->eval[i] : -g->eval[i])))
+    cairo_set_source_rgba(cr, 1, 1, 1, 0.12);
+    cairo_rectangle(cr, px, py + ph / 2, pw, 1);
+    cairo_fill(cr);
+    cairo_move_to(cr, GX(0), py + ph / 2);
+    for (int i = 0; i <= n; i++) cairo_line_to(cr, GX(i), GY(i));
+    cairo_line_to(cr, GX(n), py + ph / 2);
+    cairo_close_path(cr);
+    cairo_set_source_rgba(cr, 0.89, 0.69, 0.29, 0.25);
+    cairo_fill(cr);
+    cairo_move_to(cr, GX(0), GY(0));
+    for (int i = 1; i <= n; i++) cairo_line_to(cr, GX(i), GY(i));
+    set(cr, C_ACCENT);
+    cairo_set_line_width(cr, 1.6);
+    cairo_stroke(cr);
+    for (int k = 0; k < a->rv_nmarks; k++) {
+        double mx = GX(a->rv_mark[k].ply + 1);
+        cairo_set_source_rgba(cr, 0.91, 0.60, 0.20, 0.9);
+        cairo_rectangle(cr, mx - 1, py, 2, ph);
+        cairo_fill(cr);
+    }
+    for (int i = 0; i < n; i++)
+        if (a->rv_mistake[i]) {
+            cairo_arc(cr, GX(i + 1), GY(i + 1), 3.5, 0, 2 * M_PI);
+            set(cr, C_ERROR);
+            cairo_fill(cr);
+        }
+    cairo_set_source_rgba(cr, 1, 1, 1, 0.5);
+    cairo_rectangle(cr, GX(a->rv_ply) - 0.5, py, 1, ph);
+    cairo_fill(cr);
+    #undef GX
+    #undef GY
+    return h;
+}
+
 static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double h) {
     /* card */
     set(cr, C_CARD);
@@ -361,6 +408,7 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
     cairo_rectangle(cr, cx, cy, cw, 1);
     cairo_fill(cr);
     cy += 14;
+    if (a->review == RV_SHOWN) cy += draw_eval_graph(a, cr, cx, cy, cw) + 12;
 
     /* bottom-up: footer help, input, message, status. Moves fill the rest. */
     double by = y + h - pad;
@@ -384,6 +432,8 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
     double tx = cx + 16, ty = by + 13;
     if (a->input_len == 0) {
         const char *ph = a->twait == TW_BEGIN || a->twait == TW_AGAIN ? "Press Enter to start" :
+                         a->review == RV_SELF ? "Better move + why, e.g. Nd2 threat  ·  ←/→" :
+                         a->review == RV_SHOWN ? "←/→ to look around" :
                          a->threat == TH_ASK ? "Their move, e.g. Bxh7+  -  or none" :
                          a->threat == TH_RESULT ? "Enter for the next" :
                          a->scan == SC_ASK ? "e.g. Nxe5   ·   empty Enter = done" :
@@ -418,6 +468,13 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
         snprintf(status, sizeof status, "%s  ·  %d found  ·  %llu s",
                  a->scan_phase ? "Their moves" : "Your moves", k,
                  (unsigned long long)((a->now - a->scan_start) / 1000));
+    } else if (a->review) {
+        const ReviewGame *g = &a->rv.g[a->rv_cur];
+        if (a->review == RV_SELF)
+            snprintf(status, sizeof status, "Your analysis  ·  ply %d of %d  ·  %d mark%s", a->rv_ply, g->n,
+                     a->rv_nmarks, a->rv_nmarks == 1 ? "" : "s");
+        else
+            snprintf(status, sizeof status, "Found %d of %d  ·  ply %d of %d", a->rv_found, a->rv_total, a->rv_ply, g->n);
     } else if (a->threat == TH_ASK) {
         snprintf(status, sizeof status, "What's the threat?  ·  %llu s", (unsigned long long)((a->now - a->th_start) / 1000));
     } else if (a->threat == TH_RESULT) {
@@ -508,6 +565,10 @@ void render_frame(App *a, cairo_t *cr, double w, double h, double scale) {
     opp_name(a->opp, a->level, opp, sizeof opp);
     if (a->drill >= 0) snprintf(opp, sizeof opp, "%s", a->dstate == DS_PLAY ? "Stockfish (full strength)" : "Opponent");
     if (a->scan || a->threat) snprintf(opp, sizeof opp, "Opponent");
+    if (a->review) {
+        const ReviewGame *g = &a->rv.g[a->rv_cur];
+        snprintf(opp, sizeof opp, "%s", g->me_white ? g->black : g->white);
+    }
     int top_color = a->flipped ? WHITE : BLACK;
     const char *top_name = top_color == a->human ? "You" : opp;
     const char *bot_name = top_color == a->human ? opp : "You";
