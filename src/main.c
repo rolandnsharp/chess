@@ -100,7 +100,24 @@ static void after_move(App *a, Move m) {
 
 /* ------------------------------------------------------------ drills */
 
-static Drill *cur_drill(App *a) { return a->drill >= 0 ? &a->drills.d[a->drill] : NULL; }
+static Drill *cur_drill(App *a) {
+    if (a->drill < 0) return NULL;
+    return a->lichess ? &a->lp_drill : &a->drills.d[a->drill];
+}
+
+/* the drill's start position; a pre-move (the opponent's) is played first */
+static void drill_setup(App *a, Drill *d, int side) {
+    new_game(a, d->fen, side);
+    a->saved = true; /* drills aren't saved as games */
+    if (!d->pre[0]) return;
+    Move m;
+    char why[256];
+    if (san_parse(&a->game.pos, d->pre, false, &m, why, sizeof why) == SAN_ERR) return;
+    game_push(&a->game, m);
+    a->animating = true;
+    a->anim_move = m;
+    a->anim_start = a->now;
+}
 
 static bool solution_move(App *a, int step, Move *m) {
     char why[256];
@@ -111,7 +128,8 @@ static bool solution_move(App *a, int step, Move *m) {
 static void drill_record(App *a, bool ok) {
     if (a->drecorded) return;
     a->drecorded = true;
-    drills_record(&a->drills, a->drill, ok);
+    if (a->lichess) puzzles_record(&a->lp, a->lp_idx, ok);
+    else drills_record(&a->drills, a->drill, ok);
     a->dsess_n++;
     if (ok) a->dsess_ok++;
 }
@@ -126,8 +144,10 @@ static void drill_finish(App *a, bool ok, const char *extra) {
     if (!a->drecorded) train_item(a);
     drill_record(a, ok);
     a->dstate = DS_DONE;
-    say(a, ok ? MSG_GOOD : MSG_ERROR, "%s%s%s  ·  Enter for the next drill.",
-        ok ? "Correct! " : "Missed. ", extra ? extra : "", d->info[0] ? d->info : "");
+    char rating[64] = "";
+    if (a->lichess) snprintf(rating, sizeof rating, "  ·  puzzle rating %.0f", a->lp.rating);
+    say(a, ok ? MSG_GOOD : MSG_ERROR, "%s%s%s%s  ·  Enter for the next.",
+        ok ? "Correct! " : "Missed. ", extra ? extra : "", d->info[0] ? d->info : "", rating);
 }
 
 static void drill_end_session(App *a) {
@@ -139,17 +159,19 @@ static void drill_end_session(App *a) {
     say(a, MSG_GOOD, "Drills finished: %d of %d right first time. Back to free play.", ok, n);
 }
 
+static void lichess_next(App *a);
+
 static void drill_next(App *a) {
+    if (a->lichess) { lichess_next(a); return; }
     int idx = drills_next(&a->drills);
     if (idx < 0) { drill_end_session(a); return; }
     a->drill = idx;
     Drill *d = &a->drills.d[idx];
     Position p;
     pos_from_fen(&p, d->fen);
-    int side = p.side;
+    int side = d->pre[0] ? !p.side : p.side;
     if (!strcmp(d->kind, "line")) side = (d->nsol - 1) % 2 == 0 ? WHITE : BLACK;
-    new_game(a, d->fen, side);
-    a->saved = true; /* drills aren't saved as games */
+    drill_setup(a, d, side);
     a->dstep = 0;
     a->dfailed = a->dshow = a->drecorded = false;
     const char *label = !strcmp(d->kind, "tactic") ? "Puzzle from your game"
@@ -161,6 +183,75 @@ static void drill_next(App *a) {
     else if (!strcmp(d->kind, "line") && side == BLACK) { a->dstate = DS_AUTO; a->dnext = a->now + 600; }
     else a->dstate = DS_ASK;
     say(a, MSG_INFO, "%s to move.", a->game.pos.side == WHITE ? "White" : "Black");
+}
+
+/* ---------------------------------------------------- lichess puzzles */
+
+static bool lichess_build(App *a, int idx) {
+    LPuzzle *p = &a->lp.p[idx];
+    Drill *d = &a->lp_drill;
+    memset(d, 0, sizeof *d);
+    snprintf(d->kind, sizeof d->kind, "lichess");
+    snprintf(d->fen, sizeof d->fen, "%s", p->fen);
+    Position pos;
+    if (!pos_from_fen(&pos, p->fen)) return false;
+    char buf[128], *save = NULL;
+    snprintf(buf, sizeof buf, "%s", p->moves);
+    int k = 0;
+    for (char *u = strtok_r(buf, " ", &save); u; u = strtok_r(NULL, " ", &save), k++) {
+        Move m;
+        if (!move_from_uci(&pos, u, &m)) return false;
+        char san[16];
+        move_to_san(&pos, m, san, sizeof san);
+        if (k == 0) snprintf(d->pre, sizeof d->pre, "%.11s", san);
+        else if (d->nsol < DRILL_MAX_SOL) snprintf(d->sol[d->nsol++], sizeof d->sol[0], "%.11s", san);
+        make_move(&pos, m);
+    }
+    if (!d->pre[0] || !d->nsol) return false;
+    char th[200];
+    puzzles_theme_text(p->themes, th, sizeof th);
+    snprintf(d->title, sizeof d->title, "Your opponent just played %s. Find the best move.", d->pre);
+    snprintf(d->info, sizeof d->info, "%s  ·  puzzle rated %d  ·  lichess.org/training/%s", th, p->rating, p->id);
+    snprintf(d->link, sizeof d->link, "https://lichess.org/training/%s", p->id);
+    return true;
+}
+
+static void lichess_next(App *a) {
+    for (int tries = 0; tries < 20; tries++) {
+        int idx = a->lichess ? puzzles_pick(&a->lp, a->lp_mask) : -1;
+        if (idx < 0) break;
+        if (!lichess_build(a, idx)) { a->lp.box[idx] = 5; continue; } /* skip a broken one */
+        a->lp_idx = idx;
+        a->drill = 0;
+        Drill *d = &a->lp_drill;
+        Position p;
+        pos_from_fen(&p, d->fen);
+        drill_setup(a, d, !p.side);
+        a->dstep = 0;
+        a->dfailed = a->dshow = a->drecorded = false;
+        a->dstate = DS_ASK;
+        bool review = a->lp.box[idx] != 255;
+        snprintf(a->banner, sizeof a->banner, "Lichess puzzle%s%s  ·  your puzzle rating %.0f%s\n%s",
+                 a->lp_theme[0] ? "  ·  " : "", a->lp_theme, a->lp.rating, review ? "  ·  review" : "", d->title);
+        say(a, MSG_INFO, "%s to move.", a->game.pos.side == WHITE ? "White" : "Black");
+        return;
+    }
+    a->lichess = false;
+    drill_end_session(a);
+}
+
+static void lichess_session(App *a, const char *themes) {
+    char err[300];
+    leave_modes(a);
+    if (!a->lp.n && !puzzles_load(&a->lp, a->base_dir, err, sizeof err)) { say(a, MSG_ERROR, "%s", err); return; }
+    a->lp_mask = puzzles_mask(themes, err, sizeof err);
+    if (err[0]) { say(a, MSG_ERROR, "%s Try e.g. /puzzles fork, /puzzles defence,quiet.", err); return; }
+    snprintf(a->lp_theme, sizeof a->lp_theme, "%s", themes ? themes : "");
+    a->lichess = true;
+    a->lp_rating_start = a->lp.rating;
+    a->dsess_n = a->dsess_ok = 0;
+    a->blind = false;
+    lichess_next(a);
 }
 
 static void drill_session(App *a, const char *kind) {
@@ -188,8 +279,7 @@ static void drill_show(App *a, const char *why) {
         strncat(line, d->sol[i], sizeof line - strlen(line) - 2);
         strncat(line, " ", sizeof line - strlen(line) - 1);
     }
-    new_game(a, d->fen, a->human);
-    a->saved = true;
+    drill_setup(a, d, a->human);
     a->dstep = 0;
     a->dshow = true;
     a->dstate = DS_AUTO;
@@ -463,6 +553,7 @@ static void leave_modes(App *a) {
     a->scan = SC_OFF;
     a->threat = TH_OFF;
     a->sq_drill = false;
+    a->lichess = false;
     a->narrows = 0;
     a->banner[0] = 0;
     a->dstate = 0;
@@ -654,7 +745,7 @@ static void plan_parse(App *a, const char *text) {
         int n = sscanf(line, "%15s %d %31s", s->kind, &s->count, s->arg);
         if (n < 2 || s->count <= 0) continue;
         if (strcmp(s->kind, "squares") && strcmp(s->kind, "scan") && strcmp(s->kind, "threats") &&
-            strcmp(s->kind, "drill") && strcmp(s->kind, "play"))
+            strcmp(s->kind, "drill") && strcmp(s->kind, "play") && strcmp(s->kind, "puzzles"))
             continue;
         a->plan_n++;
     }
@@ -690,7 +781,9 @@ static void step_label(const TrainStep *s, char *out, size_t n) {
                       : !strncmp(s->arg, "line", 4) || !strncmp(s->arg, "open", 4) ? "Your opening lines"
                       : !strncmp(s->arg, "end", 3) ? "Endgames you let slip" : "Drills";
         snprintf(out, n, "%s: %d", w, s->count);
-    } else if (!strcmp(s->kind, "play")) snprintf(out, n, "Play %d game%s against Stockfish%s%s", s->count,
+    } else if (!strcmp(s->kind, "puzzles")) snprintf(out, n, "Lichess puzzles: %d%s%s", s->count,
+                                                     s->arg[0] ? ", " : "", s->arg);
+    else if (!strcmp(s->kind, "play")) snprintf(out, n, "Play %d game%s against Stockfish%s%s", s->count,
                                                   s->count > 1 ? "s" : "", s->arg[0] ? " " : "", s->arg);
     else snprintf(out, n, "%s", s->kind);
 }
@@ -724,6 +817,7 @@ static void train_begin_step(App *a) {
     else if (!strcmp(s->kind, "scan")) scan_start_session(a, s->arg);
     else if (!strcmp(s->kind, "threats")) threat_start(a);
     else if (!strcmp(s->kind, "drill")) drill_session(a, s->arg[0] ? s->arg : NULL);
+    else if (!strcmp(s->kind, "puzzles")) lichess_session(a, s->arg);
     else if (!strcmp(s->kind, "play")) {
         leave_modes(a);
         int lv = atoi(s->arg + (strncmp(s->arg, "level=", 6) ? 0 : 6));
@@ -754,6 +848,9 @@ static void train_end_step(App *a) {
             snprintf(s->summary, sizeof s->summary, "spotted %d of %d threats", a->th_sess_ok, a->th_sess_n);
         else if (!strcmp(s->kind, "drill"))
             snprintf(s->summary, sizeof s->summary, "%d of %d right first time", a->dsess_ok, a->dsess_n);
+        else if (!strcmp(s->kind, "puzzles"))
+            snprintf(s->summary, sizeof s->summary, "%d of %d solved, puzzle rating %.0f -> %.0f", a->dsess_ok,
+                     a->dsess_n, a->lp_rating_start, a->lp.rating);
         else
             snprintf(s->summary, sizeof s->summary, "%d game%s played", a->tdone, a->tdone == 1 ? "" : "s");
     }
@@ -822,7 +919,7 @@ static const char *HELP =
     "/coords (board labels) · /squares (30 s square-naming drill) · "
     "/drill [puzzles|punish|lines|endgames] · /answer · /next · /play (leave drills) · "
     "/scan [captures|checks] (list every check and capture) · /threats (what does their move threaten?) · "
-    "/train (today's guided session) · /skip · /stop · "
+    "/train (today's guided session) · /skip · /stop · /puzzles [themes] (lichess, at your level) · "
     "/strict · /pgn (save) · /fen (copy) · /resign · /quit";
 
 static void next_square(App *a) {
@@ -928,6 +1025,8 @@ static bool command(App *a, const char *line) {
     } else if (!strcmp(cmd, "stop")) {
         if (a->training) train_stop(a);
         else { leave_modes(a); new_game(a, NULL, a->pref_side); say(a, MSG_INFO, "Stopped."); }
+    } else if (!strcmp(cmd, "puzzles") || !strcmp(cmd, "pz")) {
+        lichess_session(a, arg);
     } else if (!strcmp(cmd, "threats") || !strcmp(cmd, "threat")) {
         threat_start(a);
     } else if (!strcmp(cmd, "scan") || !strcmp(cmd, "cc")) {

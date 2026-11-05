@@ -28,6 +28,7 @@ built-in engine; with it, levels 1–9 are Elo 1320–2920 and 10 is full streng
 | `/drill [puzzles\|punish\|lines\|endgames]` | drills made from your own games (all kinds if none given) |
 | `/answer`, `/next`, `/play` | give up and see the answer, skip, leave drills |
 | `/train` (or `./chess train`) | today's guided session from your plan; `/skip` a step, `/stop` |
+| `/puzzles [themes]` | lichess puzzles near your level (e.g. `fork`, `defence,quiet`); tracks a puzzle rating |
 | `/threats` | what does your opponent's last move threaten? type it, or `none` |
 | `/scan [captures\|checks]` | type every check and capture, yours then your opponent's; scored against the legal-move list |
 | `/flip`, `/fen`, `/pgn`, `/resign`, `/help`, `/quit` | |
@@ -64,6 +65,15 @@ Results go to `data/scan_log.tsv`, so you can watch the score and time improve.
 Spaced repetition: a drill you get right comes back after 1, 3, 7, 21, then 60
 days; a miss comes back later in the same session. Progress is in `data/progress.tsv`.
 
+## Lichess puzzles
+
+    curl -o data/puzzles/lichess_db_puzzle.csv.zst https://database.lichess.org/lichess_db_puzzle.csv.zst
+    python3 analysis/puzzles.py      # ~58k well-tested puzzles, balanced by motif and rating
+
+Puzzles are picked about 300 points below your puzzle rating, aiming for about
+85% first-try success (see `docs/improving.md`). Missed ones come back the next
+day and then on a spaced schedule. The puzzle database is CC0, from lichess.org.
+
 ## Training plan
 
 `/train` walks through `data/plan.txt` step by step (falls back to
@@ -77,6 +87,8 @@ The plan is meant to be rewritten by a coach (Claude, see `CLAUDE.md`) after
 - `src/engine.c` — Stockfish over UCI; `src/ai.c` — fallback alpha-beta engine
 - `src/render.c` — cairo/pango drawing; `src/main.c` — SDL3 window, input, drill flow
 - `src/drill.c` — drill loading and spaced-repetition scheduling
+- `src/puzzles.c` — lichess puzzle selection, puzzle rating, reviews
+- `docs/improving.md` — what the research says about improving, and how the trainer applies it
 - `assets/pieces/cburnett` — piece set by Colin M.L. Burnett (GPLv2+), via lichess
 - `analysis/` — game analysis scripts (python-chess + Stockfish; `python3 -m venv .venv && .venv/bin/pip install chess`)
 - `data/` — downloaded games (chess.com `hacktrick`, lichess `trincyolo`)

@@ -12,6 +12,7 @@
 typedef struct {
     char kind[12]; /* tactic, punish, line, endgame */
     char fen[100];
+    char pre[12]; /* the opponent's move played before you start, or "" */
     char sol[DRILL_MAX_SOL][12];
     int nsol;
     char title[300], link[200], info[300];

@@ -1,6 +1,6 @@
 # Default training plan, used by /train when data/plan.txt doesn't exist.
 # Steps: kind count [option]. Kinds: squares, scan [captures|checks],
-# threats, drill <puzzles|punish|lines|endgames>, play [level=N].
+# threats, drill <puzzles|punish|lines|endgames>, puzzles [themes], play [level=N].
 # "note" lines are shown at the start; "coords off" hides board labels.
 
 note A general session: board vision first, then positions from your own games.
@@ -12,4 +12,5 @@ scan 5
 threats 8
 drill 6 puzzles
 drill 4 punish
+puzzles 8
 drill 3 lines

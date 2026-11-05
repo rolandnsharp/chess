@@ -7,6 +7,7 @@
 
 #include "chess.h"
 #include "drill.h"
+#include "puzzles.h"
 #include "engine.h"
 
 enum { MSG_INFO, MSG_NOTE, MSG_ERROR, MSG_GOOD };
@@ -90,6 +91,15 @@ typedef struct {
     int scan_count, scan_next;
     int scan_sess_found, scan_sess_total, scan_sess_phases;
     double scan_sess_secs;
+
+    /* lichess puzzles: drill flow on a scratch Drill */
+    PuzzleSet lp;
+    bool lichess;
+    int lp_idx;
+    uint64_t lp_mask;
+    char lp_theme[64];
+    Drill lp_drill;
+    double lp_rating_start;
 
     /* threat spotting */
     int threat;            /* TH_* */

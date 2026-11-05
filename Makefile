@@ -5,7 +5,7 @@ GUI_CFLAGS = $(shell pkg-config --cflags $(PKGS))
 GUI_LIBS   = $(shell pkg-config --libs $(PKGS)) -lpthread -lm
 
 CORE = src/chess.c
-APP  = src/main.c src/render.c src/engine.c src/ai.c src/drill.c
+APP  = src/main.c src/render.c src/engine.c src/ai.c src/drill.c src/puzzles.c
 
 all: chess test_chess
 
