@@ -13,7 +13,23 @@ enum { MSG_INFO, MSG_NOTE, MSG_ERROR, MSG_GOOD };
 enum { DS_ASK = 1, DS_AUTO, DS_DONE, DS_PLAY };
 enum { SC_OFF = 0, SC_ASK, SC_RESULT };
 
+enum { TH_OFF = 0, TH_ASK, TH_RESULT };
+enum { TW_NONE = 0, TW_BEGIN, TW_AGAIN, TW_FINISHED };
+
 #define SCAN_MAX 64
+#define ARROWS_MAX 16
+#define PLAN_MAX 24
+
+typedef struct {
+    char fen_before[100], last_move[12], answers[100], played[16], note[200];
+} ThreatPos;
+
+typedef struct {
+    char kind[16]; /* squares, scan, threats, drill, play */
+    char arg[32];
+    int count;
+    char summary[160];
+} TrainStep;
 typedef struct {
     char fen_before[100], last_move[12], link[200], note[120];
 } ScanPos;
@@ -24,6 +40,7 @@ typedef struct {
     Game game;
     Opponent *opp;
     int human;   /* WHITE or BLACK */
+    int pref_side; /* the side you chose for free play */
     int level;   /* LEVEL_MIN..LEVEL_MAX */
     bool flipped, blind, strict;
     uint64_t peek_until; /* show pieces in blind mode until this time */
@@ -57,7 +74,7 @@ typedef struct {
     bool drecorded;
     uint64_t dnext;     /* when the next automatic move is played */
     int dsess_n, dsess_ok;
-    char banner[512];   /* drill prompt, shown in the panel */
+    char banner[1200];  /* drill prompt or training plan, shown in the panel */
 
     /* checks-and-captures scan */
     int scan;              /* SC_* */
@@ -73,6 +90,28 @@ typedef struct {
     int scan_count, scan_next;
     int scan_sess_found, scan_sess_total, scan_sess_phases;
     double scan_sess_secs;
+
+    /* threat spotting */
+    int threat;            /* TH_* */
+    ThreatPos *th_list;
+    int th_count, th_next;
+    Position th_pos;       /* the opponent to move, as if given a free move */
+    Move th_ans[8];
+    int th_nans;
+    bool th_none;          /* the answer is "no threat" */
+    uint64_t th_start;
+    int th_sess_n, th_sess_ok;
+
+    /* generic arrows (threat answers); colours: 0 green, 1 red, 2 orange */
+    Move arrows[ARROWS_MAX];
+    int arrow_col[ARROWS_MAX], narrows;
+
+    /* training run: a plan of steps, written by the coach */
+    bool training;
+    TrainStep plan[PLAN_MAX];
+    int plan_n, tstep, tdone, twait;
+    char plan_note[800], plan_source[64];
+    int sq_sess_rounds, sq_sess_score;
 
     bool saved; /* finished game written to games/ */
     char base_dir[1024];

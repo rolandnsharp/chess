@@ -73,6 +73,7 @@ static bool save_pgn(App *a, char *path_out, size_t n) {
 
 static Drill *cur_drill(App *a);
 static void drill_finish(App *a, bool ok, const char *extra);
+static void train_item(App *a);
 
 static void after_move(App *a, Move m) {
     a->animating = true;
@@ -91,8 +92,9 @@ static void after_move(App *a, Move m) {
         a->saved = save_pgn(a, path, sizeof path);
         bool won = (strcmp(game_result(&a->game), "1-0") == 0) == (a->human == WHITE) &&
                    strcmp(game_result(&a->game), "1/2-1/2") != 0;
-        say(a, won ? MSG_GOOD : MSG_NOTE, "%s. %s Saved to games/. /new for another.",
-            status_text(st), won ? "Well played!" : "");
+        say(a, won ? MSG_GOOD : MSG_NOTE, "%s. %s Saved to games/. %s",
+            status_text(st), won ? "Well played!" : "", a->training ? "Enter to continue." : "/new for another.");
+        if (a->training) train_item(a);
     }
 }
 
@@ -114,8 +116,14 @@ static void drill_record(App *a, bool ok) {
     if (ok) a->dsess_ok++;
 }
 
+static void train_item(App *a);
+static bool train_step_full(App *a);
+static void train_end_step(App *a);
+static void leave_modes(App *a);
+
 static void drill_finish(App *a, bool ok, const char *extra) {
     Drill *d = cur_drill(a);
+    if (!a->drecorded) train_item(a);
     drill_record(a, ok);
     a->dstate = DS_DONE;
     say(a, ok ? MSG_GOOD : MSG_ERROR, "%s%s%s  ·  Enter for the next drill.",
@@ -124,9 +132,10 @@ static void drill_finish(App *a, bool ok, const char *extra) {
 
 static void drill_end_session(App *a) {
     int n = a->dsess_n, ok = a->dsess_ok;
+    if (a->training) { train_end_step(a); return; }
     a->drill = -1;
     a->banner[0] = 0;
-    new_game(a, NULL, a->human);
+    new_game(a, NULL, a->pref_side);
     say(a, MSG_GOOD, "Drills finished: %d of %d right first time. Back to free play.", ok, n);
 }
 
@@ -156,6 +165,7 @@ static void drill_next(App *a) {
 
 static void drill_session(App *a, const char *kind) {
     char err[300];
+    leave_modes(a);
     drills_free(&a->drills);
     if (!drills_load(&a->drills, a->base_dir, err, sizeof err)) { say(a, MSG_ERROR, "%s", err); return; }
     if (drills_queue(&a->drills, kind) == 0) {
@@ -171,6 +181,7 @@ static void drill_session(App *a, const char *kind) {
 static void drill_show(App *a, const char *why) {
     Drill *d = cur_drill(a);
     a->dfailed = true;
+    if (!a->drecorded) train_item(a);
     drill_record(a, false);
     char line[300] = "";
     for (int i = 0; i < d->nsol; i++) {
@@ -388,13 +399,14 @@ static void scan_continue(App *a) {
         say(a, MSG_INFO, "Now the threats: what could your opponent take or check with, if it were their move?");
         return;
     }
+    train_item(a);
+    if (train_step_full(a)) return;
     scan_next_position(a);
 }
 
 static void scan_start_session(App *a, const char *arg) {
     if (!scan_load(a)) { say(a, MSG_ERROR, "No scan positions: run analysis/report.py to make data/analysis/drills/scan.tsv."); return; }
-    opp_cancel(a->opp);
-    a->drill = -1;
+    leave_modes(a);
     a->blind = false;
     a->scan_mode = !strncmp(arg, "cap", 3) ? 1 : !strncmp(arg, "che", 3) ? 2 : 0;
     a->scan_sess_found = a->scan_sess_total = a->scan_sess_phases = 0;
@@ -405,7 +417,7 @@ static void scan_start_session(App *a, const char *arg) {
 static void scan_stop(App *a) {
     a->scan = SC_OFF;
     a->banner[0] = 0;
-    new_game(a, NULL, a->human);
+    new_game(a, NULL, a->pref_side);
     if (a->scan_sess_phases)
         say(a, MSG_INFO, "Scan session: %d of %d found (%.0f%%) over %d boards, %.0f s each on average.",
             a->scan_sess_found, a->scan_sess_total,
@@ -439,13 +451,378 @@ static void scan_input(App *a, const char *line) {
     say(a, MSG_ERROR, "%s is legal, but it isn't %s.", san, SCAN_NOT[a->scan_mode]);
 }
 
+
+/* -------------------------------------------------------- mode handling */
+
+static void scan_stop(App *a);
+
+/* stop whatever drill or game is running; the training run survives */
+static void leave_modes(App *a) {
+    opp_cancel(a->opp);
+    a->drill = -1;
+    a->scan = SC_OFF;
+    a->threat = TH_OFF;
+    a->sq_drill = false;
+    a->narrows = 0;
+    a->banner[0] = 0;
+    a->dstate = 0;
+}
+
+/* -------------------------------------------------------- threat spotting */
+
+static bool threat_load(App *a) {
+    if (a->th_list) return true;
+    char path[1200];
+    snprintf(path, sizeof path, "%sdata/analysis/drills/threats.tsv", a->base_dir);
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    char *line = NULL;
+    size_t cap = 0;
+    int alloc = 0;
+    while (getline(&line, &cap, f) > 0) {
+        if (line[0] == '#') continue;
+        if (a->th_count == alloc) {
+            alloc = alloc ? alloc * 2 : 256;
+            a->th_list = realloc(a->th_list, (size_t)alloc * sizeof *a->th_list);
+        }
+        ThreatPos *t = &a->th_list[a->th_count];
+        char *save = NULL, *f1 = strtok_r(line, "\t\n", &save), *f2 = strtok_r(NULL, "\t\n", &save),
+             *f3 = strtok_r(NULL, "\t\n", &save), *f4 = strtok_r(NULL, "\t\n", &save),
+             *f5 = strtok_r(NULL, "\t\n", &save);
+        if (!f1 || !f2 || !f3) continue;
+        snprintf(t->fen_before, sizeof t->fen_before, "%s", f1);
+        snprintf(t->last_move, sizeof t->last_move, "%s", f2);
+        snprintf(t->answers, sizeof t->answers, "%s", f3);
+        snprintf(t->played, sizeof t->played, "%s", f4 ? f4 : "");
+        snprintf(t->note, sizeof t->note, "%s", f5 ? f5 : "");
+        a->th_count++;
+    }
+    free(line);
+    fclose(f);
+    for (int i = a->th_count - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        ThreatPos tmp = a->th_list[i]; a->th_list[i] = a->th_list[j]; a->th_list[j] = tmp;
+    }
+    return a->th_count > 0;
+}
+
+static void threat_next(App *a) {
+    for (int tries = 0; tries < a->th_count; tries++) {
+        ThreatPos *t = &a->th_list[a->th_next++ % a->th_count];
+        Position p;
+        Move m;
+        char why[256];
+        if (!pos_from_fen(&p, t->fen_before) || san_parse(&p, t->last_move, false, &m, why, sizeof why) == SAN_ERR)
+            continue;
+        int me = !p.side;
+        new_game(a, t->fen_before, me);
+        a->saved = true;
+        game_push(&a->game, m);
+        a->animating = false;
+        a->th_pos = a->game.pos;
+        a->th_pos.side = !a->th_pos.side;
+        a->th_pos.ep = -1;
+        a->th_none = !strcmp(t->answers, "none");
+        a->th_nans = 0;
+        if (!a->th_none) {
+            char buf[100], *save = NULL;
+            snprintf(buf, sizeof buf, "%s", t->answers);
+            for (char *s = strtok_r(buf, " ", &save); s && a->th_nans < 8; s = strtok_r(NULL, " ", &save))
+                if (san_parse(&a->th_pos, s, false, &a->th_ans[a->th_nans], why, sizeof why) != SAN_ERR) a->th_nans++;
+            if (a->th_nans == 0) continue;
+        }
+        a->threat = TH_ASK;
+        a->narrows = 0;
+        a->th_start = a->now;
+        const char *them = me == WHITE ? "Black" : "White";
+        snprintf(a->banner, sizeof a->banner, "Threat spotting  ·  position %d\n"
+                 "%s just played %s. What does it threaten? Type the move %s wants to play next - or none.",
+                 a->th_next, them, a->game.san[0], them);
+        a->msg[0] = 0;
+        return;
+    }
+    a->threat = TH_OFF;
+    say(a, MSG_ERROR, "No usable positions in threats.tsv.");
+}
+
+static void threat_log(App *a, bool ok, const char *guess) {
+    char path[1200];
+    snprintf(path, sizeof path, "%sdata/threat_log.tsv", a->base_dir);
+    FILE *f = fopen(path, "a");
+    if (!f) return;
+    time_t t = time(NULL);
+    char stamp[32];
+    strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M", localtime(&t));
+    ThreatPos *tp = &a->th_list[(a->th_next - 1) % a->th_count];
+    fprintf(f, "%s\t%s\t%s\t%s\t%d\t%.1f\n", stamp, tp->fen_before, tp->answers, guess, ok,
+            (double)(a->now - a->th_start) / 1000.0);
+    fclose(f);
+}
+
+static void train_item(App *a);
+
+static void threat_input(App *a, const char *line) {
+    ThreatPos *tp = &a->th_list[(a->th_next - 1) % a->th_count];
+    bool says_none = !strcasecmp(line, "none") || !strcasecmp(line, "nothing") || !strcasecmp(line, "no") ||
+                     !strcmp(line, "-");
+    Move g = {0};
+    char why[256];
+    if (!says_none && san_parse(&a->th_pos, line, false, &g, why, sizeof why) == SAN_ERR) {
+        /* the parser speaks to the side to move; here that's the opponent */
+        const char *them = a->th_pos.side == WHITE ? "White" : "Black";
+        char fixed[300];
+        if (!strncmp(why, "You have no ", 12)) snprintf(fixed, sizeof fixed, "%s has no %s", them, why + 12);
+        else if (!strncmp(why, "You're in check", 15)) snprintf(fixed, sizeof fixed, "%s would be in check", them);
+        else snprintf(fixed, sizeof fixed, "%s", why);
+        say(a, MSG_ERROR, "%s - %s (typing %s's move)", line, fixed, them);
+        return;
+    }
+    bool ok = false;
+    if (says_none) ok = a->th_none;
+    else for (int i = 0; i < a->th_nans; i++) if (move_eq(g, a->th_ans[i])) ok = true;
+    a->threat = TH_RESULT;
+    a->th_sess_n++;
+    a->th_sess_ok += ok;
+    threat_log(a, ok, line);
+    train_item(a);
+    /* arrows: the threats, plus a wrong guess in orange */
+    a->narrows = 0;
+    for (int i = 0; i < a->th_nans && a->narrows < ARROWS_MAX; i++) {
+        a->arrows[a->narrows] = a->th_ans[i];
+        a->arrow_col[a->narrows++] = ok ? 0 : 1;
+    }
+    if (!ok && !says_none && a->narrows < ARROWS_MAX) { a->arrows[a->narrows] = g; a->arrow_col[a->narrows++] = 2; }
+    char ans[160] = "";
+    for (int i = 0; i < a->th_nans; i++) {
+        char s[16];
+        move_to_san(&a->th_pos, a->th_ans[i], s, sizeof s);
+        strncat(ans, i ? " or " : "", sizeof ans - strlen(ans) - 1);
+        strncat(ans, s, sizeof ans - strlen(ans) - 1);
+    }
+    if (ok && a->th_none) say(a, MSG_GOOD, "Right - nothing serious is threatened. %s  ·  Enter for the next.", tp->note);
+    else if (ok) say(a, MSG_GOOD, "Yes: %s. %s  ·  Enter for the next.", ans, tp->note);
+    else if (a->th_none) say(a, MSG_ERROR, "No real threat here - %s doesn't win anything. %s  ·  Enter for the next.", line, tp->note);
+    else say(a, MSG_ERROR, "The threat was %s (red). %s  ·  Enter for the next.", ans, tp->note);
+}
+
+static void threat_start(App *a) {
+    if (!threat_load(a)) { say(a, MSG_ERROR, "No threat positions yet: run analysis/threats.py."); return; }
+    leave_modes(a);
+    a->th_sess_n = a->th_sess_ok = 0;
+    a->blind = false;
+    threat_next(a);
+}
+
+/* ------------------------------------------------------------ training */
+
+static void sq_start(App *a);
+static void train_end_step(App *a);
+static void drill_session(App *a, const char *kind);
+static void scan_start_session(App *a, const char *arg);
+
+static const char *DEFAULT_PLAN =
+    "# Default plan: used until your coach writes data/plan.txt\n"
+    "note Most of your lost points are middlegame blunders: pieces left hanging and "
+    "captures missed. Today is about seeing the whole board before you move.\n"
+    "coords off\n"
+    "squares 1\n"
+    "scan 5\n"
+    "threats 8\n"
+    "drill 6 puzzles\n"
+    "drill 4 punish\n"
+    "drill 3 lines\n";
+
+static void plan_parse(App *a, const char *text) {
+    a->plan_n = 0;
+    a->plan_note[0] = 0;
+    char buf[8192];
+    snprintf(buf, sizeof buf, "%s", text);
+    char *save = NULL;
+    for (char *line = strtok_r(buf, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        while (*line == ' ') line++;
+        if (!*line || *line == '#') continue;
+        if (!strncmp(line, "note ", 5)) {
+            if (a->plan_note[0]) strncat(a->plan_note, " ", sizeof a->plan_note - strlen(a->plan_note) - 1);
+            strncat(a->plan_note, line + 5, sizeof a->plan_note - strlen(a->plan_note) - 1);
+            continue;
+        }
+        if (!strncmp(line, "coords ", 7)) { a->coords = strncmp(line + 7, "off", 3) != 0; continue; }
+        if (!strncmp(line, "blind ", 6)) { a->blind = strncmp(line + 6, "off", 3) != 0; continue; }
+        if (a->plan_n >= PLAN_MAX) break;
+        TrainStep *s = &a->plan[a->plan_n];
+        memset(s, 0, sizeof *s);
+        int n = sscanf(line, "%15s %d %31s", s->kind, &s->count, s->arg);
+        if (n < 2 || s->count <= 0) continue;
+        if (strcmp(s->kind, "squares") && strcmp(s->kind, "scan") && strcmp(s->kind, "threats") &&
+            strcmp(s->kind, "drill") && strcmp(s->kind, "play"))
+            continue;
+        a->plan_n++;
+    }
+}
+
+static void plan_load(App *a) {
+    const char *places[] = {"data/plan.txt", "plans/default.txt"};
+    for (int i = 0; i < 2; i++) {
+        char path[1200];
+        snprintf(path, sizeof path, "%s%s", a->base_dir, places[i]);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        static char text[8192];
+        size_t n = fread(text, 1, sizeof text - 1, f);
+        text[n] = 0;
+        fclose(f);
+        plan_parse(a, text);
+        snprintf(a->plan_source, sizeof a->plan_source, "%s", places[i]);
+        if (a->plan_n) return;
+    }
+    plan_parse(a, DEFAULT_PLAN);
+    snprintf(a->plan_source, sizeof a->plan_source, "built-in default");
+}
+
+static void step_label(const TrainStep *s, char *out, size_t n) {
+    if (!strcmp(s->kind, "squares")) snprintf(out, n, "Square naming: %d round%s of 30 s", s->count, s->count > 1 ? "s" : "");
+    else if (!strcmp(s->kind, "scan")) snprintf(out, n, "Checks & captures: %d board%s%s%s", s->count, s->count > 1 ? "s" : "",
+                                               s->arg[0] ? ", " : "", s->arg);
+    else if (!strcmp(s->kind, "threats")) snprintf(out, n, "Threat spotting: %d position%s", s->count, s->count > 1 ? "s" : "");
+    else if (!strcmp(s->kind, "drill")) {
+        const char *w = !strncmp(s->arg, "puz", 3) || !strncmp(s->arg, "tac", 3) ? "Puzzles from your games"
+                      : !strncmp(s->arg, "pun", 3) ? "Punish the blunder"
+                      : !strncmp(s->arg, "line", 4) || !strncmp(s->arg, "open", 4) ? "Your opening lines"
+                      : !strncmp(s->arg, "end", 3) ? "Endgames you let slip" : "Drills";
+        snprintf(out, n, "%s: %d", w, s->count);
+    } else if (!strcmp(s->kind, "play")) snprintf(out, n, "Play %d game%s against Stockfish%s%s", s->count,
+                                                  s->count > 1 ? "s" : "", s->arg[0] ? " " : "", s->arg);
+    else snprintf(out, n, "%s", s->kind);
+}
+
+static void train_log_step(App *a, const TrainStep *s) {
+    char path[1200];
+    snprintf(path, sizeof path, "%sdata/train_log.tsv", a->base_dir);
+    FILE *f = fopen(path, "a");
+    if (!f) return;
+    time_t t = time(NULL);
+    char stamp[32];
+    strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M", localtime(&t));
+    fprintf(f, "%s\t%s %s\t%d\t%d\t%s\n", stamp, s->kind, s->arg, s->count, a->tdone, s->summary);
+    fclose(f);
+}
+
+static void train_show_next(App *a, const char *done_line) {
+    char label[160];
+    step_label(&a->plan[a->tstep], label, sizeof label);
+    snprintf(a->banner, sizeof a->banner, "Training  ·  step %d of %d\n%s%sNext: %s.",
+             a->tstep + 1, a->plan_n, done_line ? done_line : "", done_line ? "\n" : "", label);
+    a->twait = TW_BEGIN;
+    say(a, MSG_INFO, "Press Enter to start.");
+}
+
+static void train_begin_step(App *a) {
+    TrainStep *s = &a->plan[a->tstep];
+    a->tdone = 0;
+    a->twait = TW_NONE;
+    if (!strcmp(s->kind, "squares")) { a->sq_sess_rounds = a->sq_sess_score = 0; sq_start(a); }
+    else if (!strcmp(s->kind, "scan")) scan_start_session(a, s->arg);
+    else if (!strcmp(s->kind, "threats")) threat_start(a);
+    else if (!strcmp(s->kind, "drill")) drill_session(a, s->arg[0] ? s->arg : NULL);
+    else if (!strcmp(s->kind, "play")) {
+        leave_modes(a);
+        int lv = atoi(s->arg + (strncmp(s->arg, "level=", 6) ? 0 : 6));
+        if (lv >= LEVEL_MIN && lv <= LEVEL_MAX) a->level = lv;
+        new_game(a, NULL, rand() % 2 ? WHITE : BLACK);
+        say(a, MSG_INFO, "Play it out. Before every move: what did their last move attack?");
+    }
+    /* a step with nothing to do (no drills due, no positions) is skipped */
+    bool running = a->sq_drill || a->scan || a->threat || a->drill >= 0 || !strcmp(s->kind, "play");
+    if (!running) {
+        snprintf(s->summary, sizeof s->summary, "skipped (%s)", a->msg);
+        train_end_step(a);
+    }
+}
+
+static void train_end_step(App *a) {
+    TrainStep *s = &a->plan[a->tstep];
+    if (!s->summary[0]) {
+        if (!strcmp(s->kind, "squares"))
+            snprintf(s->summary, sizeof s->summary, "%d squares in %d round%s", a->sq_sess_score, a->sq_sess_rounds,
+                     a->sq_sess_rounds == 1 ? "" : "s");
+        else if (!strcmp(s->kind, "scan"))
+            snprintf(s->summary, sizeof s->summary, "found %d of %d checks & captures (%.0f%%), %.0f s a board",
+                     a->scan_sess_found, a->scan_sess_total,
+                     a->scan_sess_total ? 100.0 * a->scan_sess_found / a->scan_sess_total : 0,
+                     a->scan_sess_phases ? a->scan_sess_secs / a->scan_sess_phases : 0);
+        else if (!strcmp(s->kind, "threats"))
+            snprintf(s->summary, sizeof s->summary, "spotted %d of %d threats", a->th_sess_ok, a->th_sess_n);
+        else if (!strcmp(s->kind, "drill"))
+            snprintf(s->summary, sizeof s->summary, "%d of %d right first time", a->dsess_ok, a->dsess_n);
+        else
+            snprintf(s->summary, sizeof s->summary, "%d game%s played", a->tdone, a->tdone == 1 ? "" : "s");
+    }
+    train_log_step(a, s);
+    char label[160], done[512];
+    step_label(s, label, sizeof label);
+    snprintf(done, sizeof done, "Done - %s: %s.", label, s->summary);
+    leave_modes(a);
+    a->tstep++;
+    if (a->tstep >= a->plan_n) {
+        a->twait = TW_FINISHED;
+        int len = snprintf(a->banner, sizeof a->banner, "Training complete\n");
+        for (int i = 0; i < a->plan_n && len < (int)sizeof a->banner; i++) {
+            step_label(&a->plan[i], label, sizeof label);
+            len += snprintf(a->banner + len, sizeof a->banner - (size_t)len, "%s: %s\n", label, a->plan[i].summary);
+        }
+        new_game(a, NULL, a->pref_side);
+        say(a, MSG_GOOD, "Well done. Results are saved in data/train_log.tsv for your coach. Enter for free play.");
+        return;
+    }
+    train_show_next(a, done);
+}
+
+/* called when one item of the current step is finished */
+static void train_item(App *a) {
+    if (a->training && a->twait == TW_NONE) a->tdone++;
+}
+
+/* at a "next item" point: true if the step's quota is met and the run moved on */
+static bool train_step_full(App *a) {
+    if (!a->training || a->twait != TW_NONE || a->tstep >= a->plan_n) return false;
+    if (a->tdone < a->plan[a->tstep].count) return false;
+    train_end_step(a);
+    return true;
+}
+
+static void train_start(App *a) {
+    leave_modes(a);
+    plan_load(a);
+    a->training = true;
+    a->tstep = 0;
+    for (int i = 0; i < a->plan_n; i++) a->plan[i].summary[0] = 0;
+    int len = snprintf(a->banner, sizeof a->banner, "Today's training (%s)\n%s\n", a->plan_source, a->plan_note);
+    for (int i = 0; i < a->plan_n && len < (int)sizeof a->banner; i++) {
+        char label[160];
+        step_label(&a->plan[i], label, sizeof label);
+        len += snprintf(a->banner + len, sizeof a->banner - (size_t)len, "%d. %s\n", i + 1, label);
+    }
+    a->twait = TW_BEGIN;
+    new_game(a, NULL, a->pref_side);
+    say(a, MSG_INFO, "Press Enter to begin. /skip skips a step, /stop ends the run.");
+}
+
+static void train_stop(App *a) {
+    leave_modes(a);
+    a->training = false;
+    a->twait = TW_NONE;
+    new_game(a, NULL, a->pref_side);
+    say(a, MSG_INFO, "Training stopped. /train to start again.");
+}
+
 static const char *HELP =
     "Moves: standard notation - e4, Nf3, exd5, Nbd7, R1e2, O-O, e8=Q. Check signs optional "
     "(required in /strict). Up/Down recall earlier input.  "
     "/new [white|black] · /flip · /undo · /level 1-10 · /blind (hide pieces) · /peek (3 s look) · "
     "/coords (board labels) · /squares (30 s square-naming drill) · "
     "/drill [puzzles|punish|lines|endgames] · /answer · /next · /play (leave drills) · "
-    "/scan [captures|checks] (list every check and capture) · "
+    "/scan [captures|checks] (list every check and capture) · /threats (what does their move threaten?) · "
+    "/train (today's guided session) · /skip · /stop · "
     "/strict · /pgn (save) · /fen (copy) · /resign · /quit";
 
 static void next_square(App *a) {
@@ -454,11 +831,32 @@ static void next_square(App *a) {
     a->sq_target = t;
 }
 
+static void sq_start(App *a) {
+    leave_modes(a);
+    a->sq_drill = true;
+    a->sq_score = a->sq_misses = 0;
+    a->sq_end = a->now + SQ_DRILL_MS;
+    a->sq_flash = 0;
+    next_square(a);
+    say(a, MSG_INFO, "Name each highlighted square - just type it, no Enter. Esc stops.");
+}
+
 static void end_square_drill(App *a, bool finished) {
     a->sq_drill = false;
     if (!finished) { say(a, MSG_INFO, "Square drill stopped."); return; }
     bool record = a->sq_score > a->sq_best;
     if (record) a->sq_best = a->sq_score;
+    if (a->training && a->twait == TW_NONE) {
+        train_item(a);
+        a->sq_sess_rounds++;
+        a->sq_sess_score += a->sq_score;
+        char res[120];
+        snprintf(res, sizeof res, "%d right, %d wrong.%s", a->sq_score, a->sq_misses, record ? " New best!" : "");
+        if (train_step_full(a)) { say(a, MSG_GOOD, "%s Press Enter to start the next step.", res); return; }
+        a->twait = TW_AGAIN;
+        say(a, MSG_GOOD, "%s Enter for the next round.", res);
+        return;
+    }
     say(a, record ? MSG_GOOD : MSG_INFO, "Squares: %d right, %d wrong in 30 s.%s Best: %d. /squares again, /flip to drill from Black's side.",
         a->sq_score, a->sq_misses, record ? " New best!" : "", a->sq_best);
 }
@@ -486,11 +884,11 @@ static bool command(App *a, const char *line) {
     sscanf(line, "/%31s %63s", cmd, arg);
     if (!strcmp(cmd, "quit") || !strcmp(cmd, "q")) return false;
     if (!strcmp(cmd, "new") || !strcmp(cmd, "n")) {
-        a->drill = -1;
-        a->banner[0] = 0;
-        a->scan = SC_OFF;
+        if (a->training) train_stop(a);
+        leave_modes(a);
         int side = !strcmp(arg, "black") || !strcmp(arg, "b") ? BLACK
-                   : !strcmp(arg, "white") || !strcmp(arg, "w") ? WHITE : a->human;
+                   : !strcmp(arg, "white") || !strcmp(arg, "w") ? WHITE : a->pref_side;
+        a->pref_side = side;
         new_game(a, NULL, side);
         say(a, MSG_INFO, "New game - you have %s.", side == WHITE ? "White" : "Black");
     } else if (!strcmp(cmd, "flip")) {
@@ -515,12 +913,28 @@ static bool command(App *a, const char *line) {
     } else if (!strcmp(cmd, "blind")) {
         a->blind = !a->blind;
         say(a, MSG_INFO, a->blind ? "Blindfold on. /peek shows the pieces for 3 seconds." : "Blindfold off.");
+    } else if (!strcmp(cmd, "train") || !strcmp(cmd, "t")) {
+        train_start(a);
+    } else if (!strcmp(cmd, "skip")) {
+        if (!a->training || a->twait == TW_FINISHED) { say(a, MSG_ERROR, "Not in a training run. /train starts one."); return true; }
+        if (a->twait == TW_BEGIN && a->tstep < a->plan_n) {
+            snprintf(a->plan[a->tstep].summary, sizeof a->plan[0].summary, "skipped");
+            a->tdone = 0;
+        } else if (a->tdone == 0) {
+            snprintf(a->plan[a->tstep].summary, sizeof a->plan[0].summary, "skipped");
+        }
+        a->twait = TW_NONE;
+        train_end_step(a);
+    } else if (!strcmp(cmd, "stop")) {
+        if (a->training) train_stop(a);
+        else { leave_modes(a); new_game(a, NULL, a->pref_side); say(a, MSG_INFO, "Stopped."); }
+    } else if (!strcmp(cmd, "threats") || !strcmp(cmd, "threat")) {
+        threat_start(a);
     } else if (!strcmp(cmd, "scan") || !strcmp(cmd, "cc")) {
         scan_start_session(a, arg);
     } else if (!strcmp(cmd, "done")) {
         if (a->scan == SC_ASK) scan_finish_phase(a);
     } else if (!strcmp(cmd, "drill") || !strcmp(cmd, "d")) {
-        if (a->scan) scan_stop(a);
         drill_session(a, arg[0] ? arg : NULL);
     } else if (!strcmp(cmd, "next")) {
         if (a->drill < 0) { say(a, MSG_ERROR, "Not in a drill. /drill starts one."); return true; }
@@ -530,21 +944,17 @@ static bool command(App *a, const char *line) {
         if (!d || a->dstate == DS_DONE) { say(a, MSG_ERROR, "No drill to give up."); return true; }
         if (!strcmp(d->kind, "endgame")) { opp_cancel(a->opp); drill_finish(a, false, "Given up. "); }
         else drill_show(a, NULL);
-    } else if (!strcmp(cmd, "play") && a->scan) {
-        scan_stop(a);
     } else if (!strcmp(cmd, "play")) {
-        if (a->drill >= 0) { opp_cancel(a->opp); a->drill = -1; a->banner[0] = 0; new_game(a, NULL, a->human); }
+        if (a->scan) scan_stop(a);
+        if (a->training) { train_stop(a); return true; }
+        leave_modes(a);
+        new_game(a, NULL, a->pref_side);
         say(a, MSG_INFO, "Free play.");
     } else if (!strcmp(cmd, "coords")) {
         a->coords = !a->coords;
         say(a, MSG_INFO, a->coords ? "Coordinates on." : "Coordinates off. /squares drills naming squares.");
     } else if (!strcmp(cmd, "squares") || !strcmp(cmd, "sq")) {
-        a->sq_drill = true;
-        a->sq_score = a->sq_misses = 0;
-        a->sq_end = a->now + SQ_DRILL_MS;
-        a->sq_flash = 0;
-        next_square(a);
-        say(a, MSG_INFO, "Name each highlighted square - just type it, no Enter. Esc stops.");
+        sq_start(a);
     } else if (!strcmp(cmd, "peek")) {
         a->peek_until = a->now + 3000;
         a->msg[0] = 0;
@@ -582,9 +992,17 @@ static bool submit(App *a) {
     a->input[0] = 0;
     a->input_len = 0;
     if (!line[0]) {
-        if (a->scan == SC_ASK) scan_finish_phase(a);
+        if (a->twait == TW_BEGIN) train_begin_step(a);
+        else if (a->twait == TW_AGAIN) { a->twait = TW_NONE; sq_start(a); }
+        else if (a->twait == TW_FINISHED) { a->training = false; a->twait = TW_NONE; a->banner[0] = 0; say(a, MSG_INFO, "Free play."); }
+        else if (a->scan == SC_ASK) scan_finish_phase(a);
         else if (a->scan == SC_RESULT) scan_continue(a);
-        else if (a->drill >= 0 && a->dstate == DS_DONE) drill_next(a);
+        else if (a->threat == TH_RESULT) { if (!train_step_full(a)) threat_next(a); }
+        else if (a->drill >= 0 && a->dstate == DS_DONE) { if (!train_step_full(a)) drill_next(a); }
+        else if (a->training && a->tstep < a->plan_n && !strcmp(a->plan[a->tstep].kind, "play") &&
+                 game_status(&a->game) != ST_ONGOING) {
+            if (!train_step_full(a)) { new_game(a, NULL, rand() % 2 ? WHITE : BLACK); a->saved = false; say(a, MSG_INFO, "Next game."); }
+        }
         return true;
     }
     if (a->nhist == 0 || strcmp(a->history[(a->nhist - 1) % HISTORY], line) != 0)
@@ -592,7 +1010,10 @@ static bool submit(App *a) {
     a->hist_pos = a->nhist;
 
     if (line[0] == '/') return command(a, line);
+    if (a->twait == TW_BEGIN || a->twait == TW_AGAIN) { say(a, MSG_INFO, "Press Enter to start."); return true; }
     if (a->scan == SC_ASK) { scan_input(a, line); return true; }
+    if (a->threat == TH_ASK) { threat_input(a, line); return true; }
+    if (a->threat == TH_RESULT) { say(a, MSG_INFO, "Press Enter for the next one."); return true; }
     if (a->scan == SC_RESULT) { say(a, MSG_INFO, "Press Enter for the next one, or /play to stop."); return true; }
     if (a->drill >= 0 && a->dstate == DS_DONE) { say(a, MSG_INFO, "Press Enter for the next drill."); return true; }
     if (a->drill >= 0 && a->dstate == DS_AUTO) { say(a, MSG_INFO, "Wait a moment..."); return true; }
@@ -618,7 +1039,7 @@ static void base_dir(char *out, size_t n) {
 
 static void usage(void) {
     fprintf(stderr,
-            "usage: chess [--black] [--level N] [--fen FEN] [--moves \"e4 e5 ...\"]\n"
+            "usage: chess [train] [--black] [--level N] [--fen FEN] [--moves \"e4 e5 ...\"]\n"
             "             [--screenshot out.png [--size WxH] [--blind]]\n");
 }
 
@@ -632,7 +1053,7 @@ int main(int argc, char **argv) {
     srand(getenv("CHESS_SEED") ? (unsigned)atoi(getenv("CHESS_SEED")) : (unsigned)time(NULL));
     const char *fen = NULL, *moves = NULL, *shot = NULL;
     int shot_w = 1280, shot_h = 800;
-    bool shot_blind = false;
+    bool shot_blind = false, start_training = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--black")) a->human = BLACK;
         else if (!strcmp(argv[i], "--level") && i + 1 < argc) a->level = atoi(argv[++i]);
@@ -642,8 +1063,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--size") && i + 1 < argc) sscanf(argv[++i], "%dx%d", &shot_w, &shot_h);
         else if (!strcmp(argv[i], "--blind")) shot_blind = true;
         else if (!strcmp(argv[i], "--no-coords")) a->coords = false;
+        else if (!strcmp(argv[i], "--train") || !strcmp(argv[i], "train")) start_training = true;
         else { usage(); return 2; }
     }
+    a->pref_side = a->human;
     if (a->level < LEVEL_MIN) a->level = LEVEL_MIN;
     if (a->level > LEVEL_MAX) a->level = LEVEL_MAX;
 
@@ -665,6 +1088,8 @@ int main(int argc, char **argv) {
             game_push(&a->game, m);
         }
     }
+
+    if (start_training) train_start(a);
 
     if (shot) { /* render one frame to a PNG, no window */
         a->blind = shot_blind;
@@ -726,7 +1151,7 @@ int main(int argc, char **argv) {
     GameStatus last_status = ST_ONGOING;
     char opp_line[96];
     opp_name(a->opp, a->level, opp_line, sizeof opp_line);
-    say(a, MSG_INFO, "Opponent: %s. Type your move and press Enter. /help for commands.", opp_line);
+    if (!a->training) say(a, MSG_INFO, "Opponent: %s. Type your move and press Enter. /help for commands.", opp_line);
 
     while (running) {
         a->now = SDL_GetTicks();
@@ -793,7 +1218,8 @@ int main(int argc, char **argv) {
         GameStatus st = game_status(&a->game);
         drill_tick(a);
         st = game_status(&a->game);
-        bool engine_plays = (a->drill < 0 || a->dstate == DS_PLAY) && !a->scan;
+        bool engine_plays = (a->drill < 0 || a->dstate == DS_PLAY) && !a->scan && !a->threat &&
+                            !a->sq_drill && (a->twait == TW_NONE || !a->training);
         if (engine_plays && st == ST_ONGOING && a->game.pos.side != a->human && !opp_busy(a->opp) && !a->animating) {
             opp_go(a->opp, &a->game, a->drill >= 0 ? LEVEL_MAX : a->level);
             dirty = true;

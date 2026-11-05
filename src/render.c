@@ -272,8 +272,10 @@ static void arrow(App *a, cairo_t *cr, Move m, double bx, double by, double s, R
 }
 
 static void draw_scan_arrows(App *a, cairo_t *cr, double bx, double by, double size) {
-    if (!a->scan) return;
     double s = size / 8;
+    static const Rgba cols[3] = {{0.373, 0.690, 0.353, 0.75}, {0.878, 0.333, 0.271, 0.85}, {0.910, 0.600, 0.200, 0.80}};
+    for (int i = 0; i < a->narrows; i++) arrow(a, cr, a->arrows[i], bx, by, s, cols[a->arrow_col[i] % 3]);
+    if (!a->scan) return;
     /* found first, so a missed arrow on the same line stays visible */
     for (int i = 0; i < a->scan_n; i++)
         if (a->scan_found[i]) arrow(a, cr, a->scan_moves[i], bx, by, s, HEX(0x5fb05a, 0.72));
@@ -381,7 +383,10 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
     cairo_stroke(cr);
     double tx = cx + 16, ty = by + 13;
     if (a->input_len == 0) {
-        const char *ph = a->scan == SC_ASK ? "e.g. Nxe5   ·   empty Enter = done" :
+        const char *ph = a->twait == TW_BEGIN || a->twait == TW_AGAIN ? "Press Enter to start" :
+                         a->threat == TH_ASK ? "Their move, e.g. Bxh7+  -  or none" :
+                         a->threat == TH_RESULT ? "Enter for the next" :
+                         a->scan == SC_ASK ? "e.g. Nxe5   ·   empty Enter = done" :
                          a->scan == SC_RESULT ? "Enter for the next" :
                          a->sq_drill ? "Type the square, e.g. e4" : your_turn ? "Your move - e.g. Nf3, exd5, O-O" : "Type a /command";
         text(cr, ph, "DejaVu Sans 17px", tx + 6, ty + 2, HEX(0x6a6358, 1), LEFT, 0);
@@ -413,6 +418,12 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
         snprintf(status, sizeof status, "%s  ·  %d found  ·  %llu s",
                  a->scan_phase ? "Their moves" : "Your moves", k,
                  (unsigned long long)((a->now - a->scan_start) / 1000));
+    } else if (a->threat == TH_ASK) {
+        snprintf(status, sizeof status, "What's the threat?  ·  %llu s", (unsigned long long)((a->now - a->th_start) / 1000));
+    } else if (a->threat == TH_RESULT) {
+        snprintf(status, sizeof status, "Spotted %d of %d", a->th_sess_ok, a->th_sess_n);
+    } else if (a->training && a->twait != TW_NONE) {
+        snprintf(status, sizeof status, a->twait == TW_FINISHED ? "Training complete" : "Training");
     } else if (a->scan == SC_RESULT) {
         snprintf(status, sizeof status, "Green found  ·  red missed");
     } else if (a->drill >= 0 && a->dstate == DS_DONE) {
@@ -432,6 +443,13 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
     }
     by -= 22;
     text(cr, status, "DejaVu Sans Bold 16px", cx, by, st != ST_ONGOING ? C_ACCENT : C_TEXT, LEFT, 0);
+    if (a->training && a->twait == TW_NONE && a->tstep < a->plan_n) {
+        char tl[120];
+        snprintf(tl, sizeof tl, "Training  ·  step %d of %d  ·  %d of %d done", a->tstep + 1, a->plan_n,
+                 a->tdone, a->plan[a->tstep].count);
+        by -= 22;
+        text(cr, tl, "DejaVu Sans 13px", cx, by, C_ACCENT, LEFT, 0);
+    }
     by -= 14;
 
     /* move list: rows of number, white, black; newest at the bottom */
@@ -489,7 +507,7 @@ void render_frame(App *a, cairo_t *cr, double w, double h, double scale) {
     char opp[96];
     opp_name(a->opp, a->level, opp, sizeof opp);
     if (a->drill >= 0) snprintf(opp, sizeof opp, "%s", a->dstate == DS_PLAY ? "Stockfish (full strength)" : "Opponent");
-    if (a->scan) snprintf(opp, sizeof opp, "Opponent");
+    if (a->scan || a->threat) snprintf(opp, sizeof opp, "Opponent");
     int top_color = a->flipped ? WHITE : BLACK;
     const char *top_name = top_color == a->human ? "You" : opp;
     const char *bot_name = top_color == a->human ? opp : "You";

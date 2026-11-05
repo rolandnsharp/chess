@@ -103,7 +103,7 @@ static bool sf_start(Opponent *o, const char *path) {
     fcntl(o->from_fd, F_SETFL, O_NONBLOCK);
     signal(SIGPIPE, SIG_IGN);
     sf_send(o, "uci");
-    if (!sf_wait_for(o, "uciok", 3000)) {
+    if (!sf_wait_for(o, "uciok", 15000)) { /* slow when the machine is busy */
         kill(pid, SIGKILL);
         waitpid(pid, NULL, 0);
         close(o->to_fd); close(o->from_fd);

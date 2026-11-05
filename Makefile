@@ -25,7 +25,17 @@ stockfish:
 	test -d third_party/Stockfish || git clone --depth 1 --branch $(SF_TAG) https://github.com/official-stockfish/Stockfish.git third_party/Stockfish
 	$(MAKE) -C third_party/Stockfish/src -j4 build ARCH=$(SF_ARCH) COMP=gcc
 
+PY = .venv/bin/python
+
+# fetch new games, analyse the newest, rebuild drills and report
+review:
+	$(PY) analysis/fetch.py
+	$(PY) analysis/analyse.py --games 300 --nodes 25000 --procs 4
+	$(PY) analysis/threats.py --procs 4
+	$(PY) analysis/report.py > /dev/null
+	@echo "report: data/analysis/report.md"
+
 clean:
 	rm -f chess test_chess
 
-.PHONY: all test clean stockfish
+.PHONY: all test clean stockfish review
