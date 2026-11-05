@@ -223,6 +223,7 @@ static void draw_board(App *a, cairo_t *cr, double bx, double by, double size, d
 
     /* pieces */
     bool hide = a->blind && a->now >= a->peek_until;
+    if (a->scan) hide = false;
     if (hide) {
         snprintf(font, sizeof font, "DejaVu Serif Italic %.1fpx", s * 0.28);
         cairo_set_source_rgba(cr, 0.2, 0.15, 0.1, 0.35);
@@ -245,6 +246,40 @@ static void draw_board(App *a, cairo_t *cr, double bx, double by, double size, d
         uint8_t pc = p->sq[am.to];
         if (pc) draw_piece(cr, pc, fx + (tx - fx) * t, fy + (ty - fy) * t, s, scale, 1);
     }
+}
+
+static void arrow(App *a, cairo_t *cr, Move m, double bx, double by, double s, Rgba c) {
+    double fx, fy, tx, ty;
+    sq_xy(a, m.from, bx, by, s, &fx, &fy);
+    sq_xy(a, m.to, bx, by, s, &tx, &ty);
+    fx += s / 2; fy += s / 2; tx += s / 2; ty += s / 2;
+    double ang = atan2(ty - fy, tx - fx), len = hypot(tx - fx, ty - fy);
+    double head = s * 0.38, w = s * 0.13;
+    cairo_save(cr);
+    cairo_translate(cr, fx, fy);
+    cairo_rotate(cr, ang);
+    cairo_move_to(cr, s * 0.18, -w / 2);
+    cairo_line_to(cr, len - head, -w / 2);
+    cairo_line_to(cr, len - head, -head * 0.55);
+    cairo_line_to(cr, len, 0);
+    cairo_line_to(cr, len - head, head * 0.55);
+    cairo_line_to(cr, len - head, w / 2);
+    cairo_line_to(cr, s * 0.18, w / 2);
+    cairo_close_path(cr);
+    set(cr, c);
+    cairo_fill(cr);
+    cairo_restore(cr);
+}
+
+static void draw_scan_arrows(App *a, cairo_t *cr, double bx, double by, double size) {
+    if (!a->scan) return;
+    double s = size / 8;
+    /* found first, so a missed arrow on the same line stays visible */
+    for (int i = 0; i < a->scan_n; i++)
+        if (a->scan_found[i]) arrow(a, cr, a->scan_moves[i], bx, by, s, HEX(0x5fb05a, 0.72));
+    if (a->scan == SC_RESULT)
+        for (int i = 0; i < a->scan_n; i++)
+            if (!a->scan_found[i]) arrow(a, cr, a->scan_moves[i], bx, by, s, HEX(0xe05545, 0.85));
 }
 
 /* the material this side is up, as small pieces plus a +N (works for any
@@ -346,7 +381,9 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
     cairo_stroke(cr);
     double tx = cx + 16, ty = by + 13;
     if (a->input_len == 0) {
-        const char *ph = a->sq_drill ? "Type the square, e.g. e4" : your_turn ? "Your move - e.g. Nf3, exd5, O-O" : "Type a /command";
+        const char *ph = a->scan == SC_ASK ? "e.g. Nxe5   ·   empty Enter = done" :
+                         a->scan == SC_RESULT ? "Enter for the next" :
+                         a->sq_drill ? "Type the square, e.g. e4" : your_turn ? "Your move - e.g. Nf3, exd5, O-O" : "Type a /command";
         text(cr, ph, "DejaVu Sans 17px", tx + 6, ty + 2, HEX(0x6a6358, 1), LEFT, 0);
         if ((a->now / 530) % 2 == 0) { set(cr, C_ACCENT); cairo_rectangle(cr, tx, ty + 2, 2, 22); cairo_fill(cr); }
     } else {
@@ -370,6 +407,14 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
         uint64_t left = a->sq_end > a->now ? a->sq_end - a->now : 0;
         snprintf(status, sizeof status, "Name the square  ·  %d right  ·  %llu s left", a->sq_score,
                  (unsigned long long)((left + 999) / 1000));
+    } else if (a->scan == SC_ASK) {
+        int k = 0;
+        for (int i = 0; i < a->scan_n; i++) k += a->scan_found[i];
+        snprintf(status, sizeof status, "%s  ·  %d found  ·  %llu s",
+                 a->scan_phase ? "Their moves" : "Your moves", k,
+                 (unsigned long long)((a->now - a->scan_start) / 1000));
+    } else if (a->scan == SC_RESULT) {
+        snprintf(status, sizeof status, "Green found  ·  red missed");
     } else if (a->drill >= 0 && a->dstate == DS_DONE) {
         snprintf(status, sizeof status, "Press Enter for the next drill");
     } else if (a->drill >= 0 && a->dstate == DS_AUTO) {
@@ -444,6 +489,7 @@ void render_frame(App *a, cairo_t *cr, double w, double h, double scale) {
     char opp[96];
     opp_name(a->opp, a->level, opp, sizeof opp);
     if (a->drill >= 0) snprintf(opp, sizeof opp, "%s", a->dstate == DS_PLAY ? "Stockfish (full strength)" : "Opponent");
+    if (a->scan) snprintf(opp, sizeof opp, "Opponent");
     int top_color = a->flipped ? WHITE : BLACK;
     const char *top_name = top_color == a->human ? "You" : opp;
     const char *bot_name = top_color == a->human ? opp : "You";
@@ -451,6 +497,7 @@ void render_frame(App *a, cairo_t *cr, double w, double h, double scale) {
     draw_player(a, cr, !top_color, bot_name, bx - 10, by + size + 16, size, scale);
 
     draw_board(a, cr, bx, by, size, scale);
+    draw_scan_arrows(a, cr, bx, by, size);
 
     double px = bx + size + 10 + m, pw = w - px - m;
     draw_panel(a, cr, px, m, pw, h - 2 * m);

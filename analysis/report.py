@@ -173,6 +173,44 @@ def write_tsv(tactics, unpunished, lines_out, thrown):
             f.write("\t".join(clean(x) for x in r) + "\n")
 
 
+def write_scan(games):
+    """Positions for the checks-and-captures drill: your move, mid-game,
+    with a handful of checks and captures on the board. Positions just
+    before one of your blunders come first. Columns: fen before the
+    opponent's last move, that move (SAN), link, note."""
+    import random
+    blunder, other = [], []
+    for g in games:
+        white = g["me_white"]
+        plies = g["plies"]
+        for i in range(14, min(len(plies), 80)):
+            p = plies[i]
+            if (i % 2 == 0) != white:
+                continue
+            board = chess.Board(p["fen"])
+            if board.is_check():
+                continue
+            n = sum(1 for m in board.legal_moves if board.is_capture(m) or board.gives_check(m))
+            board.turn = not board.turn
+            board.ep_square = None
+            n_opp = sum(1 for m in board.legal_moves if board.is_capture(m) or board.gives_check(m))
+            if not (2 <= n <= 12 and 1 <= n_opp <= 12):
+                continue
+            loss = wp(mine(p["eval"], white)) - wp(mine(p["eval_after"], white))
+            row = (plies[i - 1]["fen"], plies[i - 1]["san"], g["link"],
+                   f"you then played {p['san']}" + (" - a blunder" if loss >= 0.3 else ""))
+            (blunder if loss >= 0.3 else other).append(row)
+    random.seed(1)
+    random.shuffle(other)
+    rows = blunder + other[: max(0, 600 - len(blunder))]
+    clean = lambda x: str(x).replace("\t", " ").replace("\n", " ")
+    with open(os.path.join(OUT, "drills", "scan.tsv"), "w") as f:
+        f.write("# fen_before\tlast_move\tlink\tnote\n")
+        for r in rows:
+            f.write("\t".join(clean(x) for x in r) + "\n")
+    return len(blunder), len(rows)
+
+
 def main():
     games = [json.load(open(f)) for f in glob.glob(os.path.join(GAMES, "*.json"))]
     games.sort(key=lambda g: g["stamp"])
@@ -358,6 +396,8 @@ def main():
         w(f"As {colour.title()}: {len(ls)} lines. "
           f"{sum(1 for l in ls if l['fixed'])} include a correction to what you usually play.\n")
     write_tsv(tactics, unpunished, lines_out, thrown)
+    nb, ns = write_scan(games)
+    w(f"Checks-and-captures positions: {ns} ({nb} from just before one of your blunders).\n")
     open(os.path.join(OUT, "report.md"), "w").write("\n".join(lines) + "\n")
     print("\n".join(lines))
 

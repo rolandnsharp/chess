@@ -11,6 +11,12 @@
 
 enum { MSG_INFO, MSG_NOTE, MSG_ERROR, MSG_GOOD };
 enum { DS_ASK = 1, DS_AUTO, DS_DONE, DS_PLAY };
+enum { SC_OFF = 0, SC_ASK, SC_RESULT };
+
+#define SCAN_MAX 64
+typedef struct {
+    char fen_before[100], last_move[12], link[200], note[120];
+} ScanPos;
 
 #define HISTORY 64
 
@@ -52,6 +58,21 @@ typedef struct {
     uint64_t dnext;     /* when the next automatic move is played */
     int dsess_n, dsess_ok;
     char banner[512];   /* drill prompt, shown in the panel */
+
+    /* checks-and-captures scan */
+    int scan;              /* SC_* */
+    int scan_mode;         /* 0 checks and captures, 1 captures, 2 checks */
+    int scan_phase;        /* 0: your moves, 1: your opponent's */
+    Position scan_pos;     /* the position being scanned, scan side to move */
+    Move scan_moves[SCAN_MAX];
+    bool scan_found[SCAN_MAX];
+    int scan_n, scan_wrong;
+    uint64_t scan_start;
+    double scan_secs;
+    ScanPos *scan_list;
+    int scan_count, scan_next;
+    int scan_sess_found, scan_sess_total, scan_sess_phases;
+    double scan_sess_secs;
 
     bool saved; /* finished game written to games/ */
     char base_dir[1024];

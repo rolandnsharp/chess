@@ -27,6 +27,7 @@ built-in engine; with it, levels 1–9 are Elo 1320–2920 and 10 is full streng
 | `/squares` | 30 s drill: name the highlighted square (no Enter needed) |
 | `/drill [puzzles\|punish\|lines\|endgames]` | drills made from your own games (all kinds if none given) |
 | `/answer`, `/next`, `/play` | give up and see the answer, skip, leave drills |
+| `/scan [captures\|checks]` | type every check and capture, yours then your opponent's; scored against the legal-move list |
 | `/flip`, `/fen`, `/pgn`, `/resign`, `/help`, `/quit` | |
 
 Up/Down recall earlier input; Esc clears. Finished games are saved to `games/`.
@@ -50,6 +51,11 @@ player names in `ME` in `analysis/analyse.py`. Four kinds of drill:
 - **lines**: your opening repertoire as you actually play it, against the replies
   you actually meet, with costly moves replaced by the engine's choice.
 - **endgames**: winning endgames you didn't win; win them against full-strength Stockfish.
+
+**Checks and captures** (`/scan`) uses positions from your games (those just
+before one of your blunders first). List every check and capture for your side,
+then for your opponent's, which is the threat scan that catches hung pieces.
+Results go to `data/scan_log.tsv`, so you can watch the score and time improve.
 
 Spaced repetition: a drill you get right comes back after 1, 3, 7, 21, then 60
 days; a miss comes back later in the same session. Progress is in `data/progress.tsv`.
