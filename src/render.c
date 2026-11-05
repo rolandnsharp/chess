@@ -166,6 +166,21 @@ static void draw_board(App *a, cairo_t *cr, double bx, double by, double size, d
     cairo_fill(cr);
     cairo_pattern_destroy(sheen);
 
+    if (a->sq_drill) {
+        double x, y;
+        sq_xy(a, a->sq_target, bx, by, s, &x, &y);
+        bool wrong = a->sq_flash && a->now - a->sq_flash < 350;
+        if (wrong) set(cr, HEX(0xf07a68, 0.75));
+        else set(cr, HEX(0xe3b04b, 0.55));
+        cairo_rectangle(cr, x, y, s, s);
+        cairo_fill(cr);
+        set(cr, wrong ? C_ERROR : HEX(0xfff1c9, 0.95));
+        cairo_set_line_width(cr, s * 0.06);
+        cairo_rectangle(cr, x + s * 0.03, y + s * 0.03, s * 0.94, s * 0.94);
+        cairo_stroke(cr);
+        return; /* no pieces, no labels: just the square */
+    }
+
     /* last move */
     if (a->game.nply > 0) {
         Move m = a->game.moves[a->game.nply - 1];
@@ -195,7 +210,7 @@ static void draw_board(App *a, cairo_t *cr, double bx, double by, double size, d
     /* coordinates, tucked into the edge squares */
     char font[64];
     snprintf(font, sizeof font, "DejaVu Sans Bold %.1fpx", s * 0.17);
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 8 && a->coords; i++) {
         int f = a->flipped ? 7 - i : i;
         int r = a->flipped ? i : 7 - i;
         char lab[2] = {(char)('a' + f), 0};
@@ -298,7 +313,7 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
 
     /* bottom-up: footer help, input, message, status. Moves fill the rest. */
     double by = y + h - pad;
-    const char *help = "/new  /flip  /undo  /level 1-10  /resign\n/blind  /peek  /strict  /pgn  /fen  /help";
+    const char *help = "/new  /flip  /undo  /level 1-10  /resign  /help\n/blind  /peek  /coords  /squares  /strict  /pgn  /fen";
     double hh = text_height(cr, help, "DejaVu Sans Mono 11px", cw);
     by -= hh;
     text(cr, help, "DejaVu Sans Mono 11px", cx, by, C_MUTED, LEFT, cw);
@@ -316,7 +331,7 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
     cairo_stroke(cr);
     double tx = cx + 16, ty = by + 13;
     if (a->input_len == 0) {
-        const char *ph = your_turn ? "Your move - e.g. Nf3, exd5, O-O" : "Type a /command";
+        const char *ph = a->sq_drill ? "Type the square, e.g. e4" : your_turn ? "Your move - e.g. Nf3, exd5, O-O" : "Type a /command";
         text(cr, ph, "DejaVu Sans 17px", tx + 6, ty + 2, HEX(0x6a6358, 1), LEFT, 0);
         if ((a->now / 530) % 2 == 0) { set(cr, C_ACCENT); cairo_rectangle(cr, tx, ty + 2, 2, 22); cairo_fill(cr); }
     } else {
@@ -336,7 +351,11 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
 
     GameStatus st = game_status(&a->game);
     char status[160];
-    if (st != ST_ONGOING) {
+    if (a->sq_drill) {
+        uint64_t left = a->sq_end > a->now ? a->sq_end - a->now : 0;
+        snprintf(status, sizeof status, "Name the square  ·  %d right  ·  %llu s left", a->sq_score,
+                 (unsigned long long)((left + 999) / 1000));
+    } else if (st != ST_ONGOING) {
         const char *res = game_result(&a->game);
         snprintf(status, sizeof status, "%s  ·  %s", status_text(st), res);
     } else if (opp_busy(a->opp)) {

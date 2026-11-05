@@ -7,3 +7,4 @@
 # downloaded games and saved games (re-fetchable, personal)
 /data/
 /games/
+/.venv/

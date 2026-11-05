@@ -90,7 +90,41 @@ static const char *HELP =
     "Moves: standard notation - e4, Nf3, exd5, Nbd7, R1e2, O-O, e8=Q. Check signs optional "
     "(required in /strict). Up/Down recall earlier input.  "
     "/new [white|black] · /flip · /undo · /level 1-10 · /blind (hide pieces) · /peek (3 s look) · "
+    "/coords (board labels) · /squares (30 s square-naming drill) · "
     "/strict · /pgn (save) · /fen (copy) · /resign · /quit";
+
+static void next_square(App *a) {
+    int t;
+    do t = rand() % 64; while (t == a->sq_target);
+    a->sq_target = t;
+}
+
+static void end_square_drill(App *a, bool finished) {
+    a->sq_drill = false;
+    if (!finished) { say(a, MSG_INFO, "Square drill stopped."); return; }
+    bool record = a->sq_score > a->sq_best;
+    if (record) a->sq_best = a->sq_score;
+    say(a, record ? MSG_GOOD : MSG_INFO, "Squares: %d right, %d wrong in 30 s.%s Best: %d. /squares again, /flip to drill from Black's side.",
+        a->sq_score, a->sq_misses, record ? " New best!" : "", a->sq_best);
+}
+
+/* in the drill, two typed characters are an answer */
+static void square_answer(App *a) {
+    char name[3];
+    sq_name(a->sq_target, name);
+    if (a->input[0] == name[0] && a->input[1] == name[1]) {
+        a->sq_score++;
+        a->msg[0] = 0;
+        next_square(a);
+    } else {
+        a->sq_misses++;
+        a->sq_flash = a->now;
+        say(a, MSG_ERROR, "%s - that was %s.", a->input, name);
+        next_square(a);
+    }
+    a->input_len = 0;
+    a->input[0] = 0;
+}
 
 static bool command(App *a, const char *line) {
     char cmd[32] = "", arg[64] = "";
@@ -122,6 +156,16 @@ static bool command(App *a, const char *line) {
     } else if (!strcmp(cmd, "blind")) {
         a->blind = !a->blind;
         say(a, MSG_INFO, a->blind ? "Blindfold on. /peek shows the pieces for 3 seconds." : "Blindfold off.");
+    } else if (!strcmp(cmd, "coords")) {
+        a->coords = !a->coords;
+        say(a, MSG_INFO, a->coords ? "Coordinates on." : "Coordinates off. /squares drills naming squares.");
+    } else if (!strcmp(cmd, "squares") || !strcmp(cmd, "sq")) {
+        a->sq_drill = true;
+        a->sq_score = a->sq_misses = 0;
+        a->sq_end = a->now + SQ_DRILL_MS;
+        a->sq_flash = 0;
+        next_square(a);
+        say(a, MSG_INFO, "Name each highlighted square - just type it, no Enter. Esc stops.");
     } else if (!strcmp(cmd, "peek")) {
         a->peek_until = a->now + 3000;
         a->msg[0] = 0;
@@ -194,6 +238,8 @@ int main(int argc, char **argv) {
     App *a = &app;
     a->level = 3;
     a->human = WHITE;
+    a->coords = true;
+    srand((unsigned)time(NULL));
     const char *fen = NULL, *moves = NULL, *shot = NULL;
     int shot_w = 1280, shot_h = 800;
     bool shot_blind = false;
@@ -205,6 +251,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) shot = argv[++i];
         else if (!strcmp(argv[i], "--size") && i + 1 < argc) sscanf(argv[++i], "%dx%d", &shot_w, &shot_h);
         else if (!strcmp(argv[i], "--blind")) shot_blind = true;
+        else if (!strcmp(argv[i], "--no-coords")) a->coords = false;
         else { usage(); return 2; }
     }
     if (a->level < LEVEL_MIN) a->level = LEVEL_MIN;
@@ -231,6 +278,7 @@ int main(int argc, char **argv) {
 
     if (shot) { /* render one frame to a PNG, no window */
         a->blind = shot_blind;
+        if (getenv("SHOT_SQUARES")) { a->sq_drill = true; a->sq_target = 28; a->sq_score = 7; a->sq_end = 18000; }
         a->now = 0;
         a->msg[0] = 0;
         if (getenv("SHOT_INPUT")) { snprintf(a->input, sizeof a->input, "%s", getenv("SHOT_INPUT")); a->input_len = (int)strlen(a->input); }
@@ -275,7 +323,8 @@ int main(int argc, char **argv) {
 
     while (running) {
         a->now = SDL_GetTicks();
-        bool busy = a->animating || opp_busy(a->opp) || a->now < a->peek_until;
+        bool busy = a->animating || opp_busy(a->opp) || a->now < a->peek_until || a->sq_drill;
+        if (a->sq_drill && a->now >= a->sq_end) { end_square_drill(a, true); }
         SDL_Event e;
         if (SDL_WaitEventTimeout(&e, busy ? 8 : 60)) {
             do {
@@ -288,6 +337,7 @@ int main(int argc, char **argv) {
                         if (*c >= 32 && *c < 127 && a->input_len < (int)sizeof a->input - 1) {
                             a->input[a->input_len++] = *c;
                             a->input[a->input_len] = 0;
+                            if (a->sq_drill && a->input[0] != '/' && a->input_len == 2) square_answer(a);
                         }
                     dirty = true;
                     break;
@@ -300,7 +350,10 @@ int main(int argc, char **argv) {
                         else if (a->input_len) a->input_len--;
                         a->input[a->input_len] = 0;
                         break;
-                    case SDLK_ESCAPE: a->input_len = 0; a->input[0] = 0; break;
+                    case SDLK_ESCAPE:
+                        if (a->sq_drill && a->input_len == 0) end_square_drill(a, false);
+                        a->input_len = 0; a->input[0] = 0;
+                        break;
                     case SDLK_UP:
                         if (a->hist_pos > 0 && a->hist_pos > a->nhist - HISTORY) {
                             a->hist_pos--;
@@ -336,7 +389,7 @@ int main(int argc, char **argv) {
         }
         if (st != last_status) { dirty = true; last_status = st; }
         if (a->now / 530 != last_blink) { last_blink = a->now / 530; dirty = true; }
-        if (a->animating || (a->peek_until && a->now < a->peek_until + 50)) dirty = true;
+        if (a->animating || a->sq_drill || (a->peek_until && a->now < a->peek_until + 50)) dirty = true;
         if (!dirty) continue;
         dirty = false;
 

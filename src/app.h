@@ -32,12 +32,20 @@ typedef struct {
     Move anim_move;
     uint64_t anim_start;
 
+    bool coords; /* board labels a-h, 1-8 */
+
+    /* square-naming drill: name the highlighted square, 30 seconds */
+    bool sq_drill;
+    int sq_target, sq_score, sq_misses, sq_best;
+    uint64_t sq_end, sq_flash; /* drill end; time of last wrong answer */
+
     bool saved; /* finished game written to games/ */
     char base_dir[1024];
     uint64_t now;
 } App;
 
 #define ANIM_MS 180
+#define SQ_DRILL_MS 30000
 
 bool render_init(const char *base_dir);
 void render_frame(App *a, cairo_t *cr, double w, double h, double scale);

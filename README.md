@@ -23,6 +23,8 @@ built-in engine; with it, levels 1–9 are Elo 1320–2920 and 10 is full streng
 | `/level N` | opponent strength 1–10 |
 | `/blind` / `/peek` | hide the pieces / show them for 3 s |
 | `/strict` | exact SAN only, including `+` and `#` |
+| `/coords` | board labels on/off (`--no-coords` to start without) |
+| `/squares` | 30 s drill: name the highlighted square (no Enter needed) |
 | `/flip`, `/fen`, `/pgn`, `/resign`, `/help`, `/quit` | |
 
 Up/Down recall earlier input; Esc clears. Finished games are saved to `games/`.
@@ -37,4 +39,5 @@ king would be in check, pawn captures need their file, and so on.
 - `src/engine.c` — Stockfish over UCI; `src/ai.c` — fallback alpha-beta engine
 - `src/render.c` — cairo/pango drawing; `src/main.c` — SDL3 window and input
 - `assets/pieces/cburnett` — piece set by Colin M.L. Burnett (GPLv2+), via lichess
+- `analysis/` — game analysis scripts (python-chess + Stockfish; `python3 -m venv .venv && .venv/bin/pip install chess`)
 - `data/` — downloaded games (chess.com `hacktrick`, lichess `trincyolo`)
