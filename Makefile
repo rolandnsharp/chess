@@ -1,11 +1,11 @@
 CC      ?= gcc
 CFLAGS  ?= -O2 -g -Wall -Wextra -std=c11 -D_GNU_SOURCE
-PKGS    = sdl3 cairo pangocairo librsvg-2.0
+PKGS    = sdl3 cairo pangocairo librsvg-2.0 libcurl
 GUI_CFLAGS = $(shell pkg-config --cflags $(PKGS))
 GUI_LIBS   = $(shell pkg-config --libs $(PKGS)) -lpthread -lm
 
 CORE = src/chess.c
-APP  = src/main.c src/render.c src/engine.c src/ai.c src/drill.c src/puzzles.c src/review.c
+APP  = src/main.c src/render.c src/engine.c src/ai.c src/drill.c src/puzzles.c src/review.c src/json.c src/lichess.c
 
 all: chess test_chess
 

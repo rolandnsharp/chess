@@ -6,9 +6,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <time.h>
 
 #include "app.h"
+#include "json.h"
 
 static void say(App *a, int kind, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
 static void say(App *a, int kind, const char *fmt, ...) {
@@ -555,6 +557,12 @@ static void leave_modes(App *a) {
     a->sq_drill = false;
     a->lichess = false;
     a->review = RV_OFF;
+    if (a->online == OL_OVER || a->online == OL_SEEKING) {
+        ls_close(a->ol_seek); a->ol_seek = NULL;
+        ls_close(a->ol_game); a->ol_game = NULL;
+        ls_close(a->ol_events); a->ol_events = NULL;
+        a->online = OL_OFF;
+    }
     a->narrows = 0;
     a->banner[0] = 0;
     a->dstate = 0;
@@ -1122,6 +1130,287 @@ static void review_reveal(App *a) {
         "%s", a->rv_found, a->rv_total, a->training ? "Enter to continue." : "/review for another game.");
 }
 
+
+/* ------------------------------------------------------ live lichess */
+
+static bool ol_load_token(App *a) {
+    const char *env = getenv("LICHESS_TOKEN");
+    if (env && *env) { snprintf(a->ol_token, sizeof a->ol_token, "%s", env); return true; }
+    char path[1200];
+    snprintf(path, sizeof path, "%sdata/lichess_token", a->base_dir);
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    char buf[128] = "";
+    if (!fgets(buf, sizeof buf, f)) buf[0] = 0;
+    fclose(f);
+    buf[strcspn(buf, " \t\r\n")] = 0;
+    snprintf(a->ol_token, sizeof a->ol_token, "%s", buf);
+    return a->ol_token[0] != 0;
+}
+
+static void ol_save_token(App *a, const char *tok) {
+    char dir[1100], path[1200];
+    snprintf(dir, sizeof dir, "%sdata", a->base_dir);
+    mkdir(dir, 0755);
+    snprintf(path, sizeof path, "%s/lichess_token", dir);
+    FILE *f = fopen(path, "w");
+    if (!f) { say(a, MSG_ERROR, "Couldn't save the token to %s.", path); return; }
+    fchmod(fileno(f), 0600);
+    fprintf(f, "%s\n", tok);
+    fclose(f);
+    snprintf(a->ol_token, sizeof a->ol_token, "%s", tok);
+    say(a, MSG_GOOD, "Token saved (data/lichess_token, readable only by you). Type /lichess to find a game.");
+}
+
+static void ol_close_all(App *a) {
+    ls_close(a->ol_seek); a->ol_seek = NULL;
+    ls_close(a->ol_game); a->ol_game = NULL;
+    ls_close(a->ol_events); a->ol_events = NULL;
+}
+
+static void ol_rebuild(App *a, const char *moves, bool animate) {
+    game_init(&a->game, NULL);
+    a->saved = true;
+    char buf[sizeof a->ol_moves], *save = NULL;
+    snprintf(buf, sizeof buf, "%s", moves);
+    Move m = {0};
+    bool any = false;
+    for (char *u = strtok_r(buf, " ", &save); u; u = strtok_r(NULL, " ", &save)) {
+        if (!move_from_uci(&a->game.pos, u, &m)) break;
+        game_push(&a->game, m);
+        any = true;
+    }
+    if (any && animate) { a->animating = true; a->anim_move = m; a->anim_start = a->now; }
+}
+
+static const char *ol_status_text(const char *st) {
+    if (!strcmp(st, "mate")) return "Checkmate";
+    if (!strcmp(st, "resign")) return "Resignation";
+    if (!strcmp(st, "outoftime")) return "Time ran out";
+    if (!strcmp(st, "timeout")) return "Opponent left the game";
+    if (!strcmp(st, "draw")) return "Draw";
+    if (!strcmp(st, "stalemate")) return "Stalemate";
+    if (!strcmp(st, "aborted")) return "Game aborted";
+    if (!strcmp(st, "noStart")) return "Game didn't start";
+    return st;
+}
+
+static void ol_apply_state(App *a, JNode *st) {
+    const char *moves = json_str(st, "moves", "");
+    if (strcmp(moves, a->ol_moves)) {
+        bool theirs = false;
+        snprintf(a->ol_moves, sizeof a->ol_moves, "%s", moves);
+        ol_rebuild(a, a->ol_moves, true);
+        theirs = a->game.nply > 0 && a->game.pos.side == a->human;
+        if (theirs) a->msg[0] = 0;
+    }
+    a->ol_time[WHITE] = (long)json_num(st, "wtime", (double)a->ol_time[WHITE]);
+    a->ol_time[BLACK] = (long)json_num(st, "btime", (double)a->ol_time[BLACK]);
+    a->ol_clock_at = a->now;
+    const char *status = json_str(st, "status", "started");
+    snprintf(a->ol_status, sizeof a->ol_status, "%s", status);
+    if (strcmp(status, "started") && strcmp(status, "created")) {
+        const char *winner = json_str(st, "winner", "");
+        const char *me = a->human == WHITE ? "white" : "black";
+        const char *verdict = !winner[0] ? (strcmp(status, "aborted") && strcmp(status, "noStart") ? "Draw." : "")
+                            : !strcmp(winner, me) ? "You won!" : "You lost.";
+        a->online = OL_OVER;
+        ol_close_all(a);
+        say(a, !strcmp(winner, me) ? MSG_GOOD : MSG_NOTE,
+            "%s. %s  It's on lichess.org/%s - make update brings it into your analysis. /lichess for another.",
+            ol_status_text(status), verdict, a->ol_id);
+        snprintf(a->banner, sizeof a->banner, "Lichess  ·  rated %d+%d  ·  finished\n%s vs %s", OL_MINUTES, OL_INCREMENT,
+                 a->ol_name[WHITE], a->ol_name[BLACK]);
+    }
+}
+
+static void ol_player(JNode *p, char *out, size_t n) {
+    if (!p) { snprintf(out, n, "?"); return; }
+    double ai = json_num(p, "aiLevel", 0);
+    if (ai > 0) { snprintf(out, n, "lichess AI level %.0f", ai); return; }
+    const char *name = json_str(p, "name", json_str(p, "id", "Anonymous"));
+    double r = json_num(p, "rating", 0);
+    if (r > 0) snprintf(out, n, "%s (%.0f%s)", name, r, json_bool(p, "provisional", false) ? "?" : "");
+    else snprintf(out, n, "%s", name);
+}
+
+static void ol_start_game(App *a, const char *id, const char *color) {
+    ls_close(a->ol_seek);
+    a->ol_seek = NULL;
+    leave_modes(a);
+    snprintf(a->ol_id, sizeof a->ol_id, "%s", id);
+    a->online = OL_PLAYING;
+    a->human = !strcmp(color, "black") ? BLACK : WHITE;
+    a->flipped = a->human == BLACK;
+    a->ol_moves[0] = 0;
+    a->ol_time[0] = a->ol_time[1] = OL_MINUTES * 60 * 1000L;
+    a->ol_clock_at = a->now;
+    snprintf(a->ol_status, sizeof a->ol_status, "started");
+    game_init(&a->game, NULL);
+    a->saved = true;
+    char path[96];
+    snprintf(path, sizeof path, "/api/board/game/stream/%s", id);
+    a->ol_game = ls_open(path, NULL, a->ol_token);
+    snprintf(a->banner, sizeof a->banner, "Lichess  ·  rated %d+%d  ·  you have %s\nBefore every move: what does their last move want? "
+             "/resign, /draw, /abort (first moves only).", OL_MINUTES, OL_INCREMENT, a->human == WHITE ? "White" : "Black");
+    say(a, MSG_GOOD, "Game on! lichess.org/%s", id);
+}
+
+static void ol_start(App *a) {
+    if (a->online == OL_PLAYING) { say(a, MSG_ERROR, "You're already in a lichess game."); return; }
+    if (!ol_load_token(a)) {
+        const char *url = "https://lichess.org/account/oauth/token/create?scopes[]=board:play&description=Notation+Trainer";
+        SDL_SetClipboardText(url);
+        say(a, MSG_INFO, "To play on lichess you need a token. Open this page (copied to your clipboard), create the "
+            "token, copy it, then type /token and paste it (Ctrl+V):  %s", url);
+        return;
+    }
+    if (a->training) train_stop(a);
+    leave_modes(a);
+    long http = 0;
+    char *body = lichess_get("/api/account", a->ol_token, &http, 15);
+    JNode *acct = json_parse(body);
+    if (!body || http != 200 || !acct) {
+        say(a, MSG_ERROR, http == 401 ? "lichess rejected the token - make a new one and use /token."
+                                      : "Couldn't reach lichess (HTTP %ld). Check your connection and try again.", http);
+        free(body); json_free(acct);
+        return;
+    }
+    snprintf(a->ol_user, sizeof a->ol_user, "%s", json_str(acct, "username", "you"));
+    double r = json_num(acct, "perfs.rapid.rating", 0);
+    json_free(acct);
+    free(body);
+    a->ol_events = ls_open("/api/stream/event", NULL, a->ol_token);
+    char seek[160];
+    snprintf(seek, sizeof seek, "rated=true&time=%d&increment=%d&variant=standard&color=random", OL_MINUTES, OL_INCREMENT);
+    a->ol_seek = ls_open("/api/board/seek", seek, a->ol_token);
+    a->online = OL_SEEKING;
+    a->ol_since = a->now;
+    new_game(a, NULL, a->pref_side);
+    snprintf(a->banner, sizeof a->banner, "Lichess  ·  %s%s%.0f\nLooking for a rated %d+%d game. It usually takes under a minute. /stop cancels.",
+             a->ol_user, r > 0 ? "  ·  rapid " : "", r, OL_MINUTES, OL_INCREMENT);
+    a->msg[0] = 0;
+}
+
+static void ol_stop(App *a) {
+    ol_close_all(a);
+    a->online = OL_OFF;
+    a->banner[0] = 0;
+    new_game(a, NULL, a->pref_side);
+    say(a, MSG_INFO, "Stopped looking for a lichess game.");
+}
+
+/* called every loop: read whatever the streams have delivered */
+static bool ol_poll(App *a) {
+    if (a->online == OL_OFF || a->online == OL_OVER) return false;
+    bool changed = false;
+    char *line;
+    while ((line = ls_next_line(a->ol_events))) {
+        JNode *j = json_parse(line);
+        const char *type = json_str(j, "type", "");
+        if (!strcmp(type, "gameStart") && a->online == OL_SEEKING) {
+            const char *id = json_str(j, "game.gameId", json_str(j, "game.id", ""));
+            /* only standard games at the trainer's time control get picked up */
+            if (id[0]) ol_start_game(a, id, json_str(j, "game.color", "white"));
+        }
+        json_free(j);
+        free(line);
+        changed = true;
+    }
+    while ((line = ls_next_line(a->ol_seek))) {
+        JNode *j = json_parse(line);
+        const char *err = json_str(j, "error", NULL);
+        if (err) say(a, MSG_ERROR, "lichess: %s", err);
+        json_free(j);
+        free(line);
+        changed = true;
+    }
+    long http;
+    char err[256];
+    if (a->online == OL_SEEKING && ls_finished(a->ol_seek, &http, err, sizeof err)) {
+        ls_close(a->ol_seek);
+        a->ol_seek = NULL;
+        if (http != 200) {
+            ol_close_all(a);
+            a->online = OL_OFF;
+            if (a->msg_kind != MSG_ERROR) say(a, MSG_ERROR, "The seek ended (HTTP %ld%s%s). /lichess to try again.", http, err[0] ? ": " : "", err);
+        }
+        changed = true;
+    }
+    while (a->ol_game && (line = ls_next_line(a->ol_game))) {
+        JNode *j = json_parse(line);
+        const char *type = json_str(j, "type", "");
+        if (!strcmp(type, "gameFull")) {
+            ol_player(json_get(j, "white"), a->ol_name[WHITE], sizeof a->ol_name[0]);
+            ol_player(json_get(j, "black"), a->ol_name[BLACK], sizeof a->ol_name[0]);
+            ol_apply_state(a, json_get(j, "state"));
+        } else if (!strcmp(type, "gameState")) {
+            ol_apply_state(a, j);
+        } else if (!strcmp(type, "opponentGone")) {
+            if (json_bool(j, "gone", false))
+                say(a, MSG_NOTE, "Your opponent left. If they don't return in %.0f s, type /claim to win.",
+                    json_num(j, "claimWinInSeconds", 0));
+        }
+        json_free(j);
+        free(line);
+        changed = true;
+        if (a->online != OL_PLAYING) return true;
+    }
+    if (a->online == OL_PLAYING && ls_finished(a->ol_game, &http, err, sizeof err)) {
+        /* dropped connection: reopen; the stream resends the full game */
+        ls_close(a->ol_game);
+        char path[96];
+        snprintf(path, sizeof path, "/api/board/game/stream/%s", a->ol_id);
+        a->ol_game = ls_open(path, NULL, a->ol_token);
+        changed = true;
+    }
+    if (a->online != OL_OFF && a->ol_events && ls_finished(a->ol_events, NULL, NULL, 0)) {
+        ls_close(a->ol_events);
+        a->ol_events = ls_open("/api/stream/event", NULL, a->ol_token);
+    }
+    if (lichess_error(err, sizeof err)) {
+        say(a, MSG_ERROR, "%s", err);
+        if (a->online == OL_PLAYING) ol_rebuild(a, a->ol_moves, false); /* undo an optimistic move */
+        changed = true;
+    }
+    return changed;
+}
+
+static void ol_user_move(App *a, Move m) {
+    char uci[8], path[96];
+    move_to_uci(m, uci);
+    game_push(&a->game, m);
+    a->animating = true;
+    a->anim_move = m;
+    a->anim_start = a->now;
+    snprintf(path, sizeof path, "/api/board/game/%s/move/%s", a->ol_id, uci);
+    lichess_post(path, "", a->ol_token);
+}
+
+static bool ol_command(App *a, const char *cmd, const char *arg) {
+    (void)arg;
+    char path[96];
+    if (!strcmp(cmd, "resign")) {
+        snprintf(path, sizeof path, "/api/board/game/%s/resign", a->ol_id);
+        lichess_post(path, "", a->ol_token);
+        say(a, MSG_NOTE, "Resigning...");
+    } else if (!strcmp(cmd, "draw")) {
+        snprintf(path, sizeof path, "/api/board/game/%s/draw/yes", a->ol_id);
+        lichess_post(path, "", a->ol_token);
+        say(a, MSG_INFO, "Draw offered (or accepted, if they offered one).");
+    } else if (!strcmp(cmd, "abort")) {
+        snprintf(path, sizeof path, "/api/board/game/%s/abort", a->ol_id);
+        lichess_post(path, "", a->ol_token);
+        say(a, MSG_INFO, "Aborting...");
+    } else if (!strcmp(cmd, "claim")) {
+        snprintf(path, sizeof path, "/api/board/game/%s/claim-victory", a->ol_id);
+        lichess_post(path, "", a->ol_token);
+    } else {
+        return false;
+    }
+    return true;
+}
+
 static const char *HELP =
     "Moves: standard notation - e4, Nf3, exd5, Nbd7, R1e2, O-O, e8=Q. Check signs optional "
     "(required in /strict). Up/Down recall earlier input.  "
@@ -1131,6 +1420,7 @@ static const char *HELP =
     "/scan [captures|checks] (list every check and capture) · /threats (what does their move threaten?) · "
     "/train (today's guided session) · /skip · /stop · /puzzles [themes] (lichess, at your level) · "
     "/review [win|loss|last] (analyse a game yourself, then /engine) · "
+    "/lichess (a rated 15+10 game on lichess; /token to set up) · "
     "/strict · /pgn (save) · /fen (copy) · /resign · /quit";
 
 static void next_square(App *a) {
@@ -1191,6 +1481,22 @@ static bool command(App *a, const char *line) {
     char cmd[32] = "", arg[64] = "";
     sscanf(line, "/%31s %63s", cmd, arg);
     if (!strcmp(cmd, "quit") || !strcmp(cmd, "q")) return false;
+    if (a->online == OL_PLAYING) {
+        /* fair play: during a live game only game commands work - no engine, drills or hints */
+        if (ol_command(a, cmd, arg)) return true;
+        if (strcmp(cmd, "flip") && strcmp(cmd, "coords") && strcmp(cmd, "help") && strcmp(cmd, "h") &&
+            strcmp(cmd, "?") && strcmp(cmd, "strict")) {
+            say(a, MSG_ERROR, "Not during a lichess game. Game commands: /resign /draw /abort /claim /flip /coords.");
+            return true;
+        }
+    }
+    if (!strcmp(cmd, "lichess") || !strcmp(cmd, "online")) { ol_start(a); return true; }
+    if (!strcmp(cmd, "token")) {
+        if (!arg[0]) { say(a, MSG_ERROR, "Paste the token after /token, e.g. /token lip_abc123 (Ctrl+V pastes)."); return true; }
+        ol_save_token(a, arg);
+        return true;
+    }
+    if (!strcmp(cmd, "stop") && a->online == OL_SEEKING) { ol_stop(a); return true; }
     if (!strcmp(cmd, "new") || !strcmp(cmd, "n")) {
         if (a->training) train_stop(a);
         leave_modes(a);
@@ -1338,6 +1644,8 @@ static bool submit(App *a) {
     if (a->scan == SC_RESULT) { say(a, MSG_INFO, "Press Enter for the next one, or /play to stop."); return true; }
     if (a->drill >= 0 && a->dstate == DS_DONE) { say(a, MSG_INFO, "Press Enter for the next drill."); return true; }
     if (a->drill >= 0 && a->dstate == DS_AUTO) { say(a, MSG_INFO, "Wait a moment..."); return true; }
+    if (a->online == OL_SEEKING) { say(a, MSG_INFO, "Still looking for an opponent... /stop cancels."); return true; }
+    if (a->online == OL_PLAYING && game_status(&a->game) != ST_ONGOING) { say(a, MSG_INFO, "Waiting for lichess..."); return true; }
     if (game_status(&a->game) != ST_ONGOING) { say(a, MSG_ERROR, "The game is over - /new to start another."); return true; }
     if (a->game.pos.side != a->human) { say(a, MSG_ERROR, "Not your move yet."); return true; }
 
@@ -1348,6 +1656,7 @@ static bool submit(App *a) {
     if (r == SAN_OK_NOTE) say(a, MSG_NOTE, "%s", why);
     else a->msg[0] = 0;
     if (a->drill >= 0 && a->dstate == DS_ASK) { drill_user_move(a, m, line); return true; }
+    if (a->online == OL_PLAYING) { ol_user_move(a, m); return true; }
     game_push(&a->game, m);
     after_move(a, m);
     return true;
@@ -1374,7 +1683,7 @@ int main(int argc, char **argv) {
     srand(getenv("CHESS_SEED") ? (unsigned)atoi(getenv("CHESS_SEED")) : (unsigned)time(NULL));
     const char *fen = NULL, *moves = NULL, *shot = NULL;
     int shot_w = 1280, shot_h = 800;
-    bool shot_blind = false, start_training = false;
+    bool shot_blind = false, start_training = false, start_online = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--black")) a->human = BLACK;
         else if (!strcmp(argv[i], "--level") && i + 1 < argc) a->level = atoi(argv[++i]);
@@ -1385,6 +1694,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--blind")) shot_blind = true;
         else if (!strcmp(argv[i], "--no-coords")) a->coords = false;
         else if (!strcmp(argv[i], "--train") || !strcmp(argv[i], "train")) start_training = true;
+        else if (!strcmp(argv[i], "--lichess") || !strcmp(argv[i], "lichess")) start_online = true;
         else { usage(); return 2; }
     }
     a->pref_side = a->human;
@@ -1435,6 +1745,7 @@ int main(int argc, char **argv) {
                 a->input_len = (int)strlen(a->input);
                 submit(a);
                 for (int k = 0; k < 8; k++) { a->now += 1000; a->animating = false; drill_tick(a); }
+                for (int k = 0; a->online && k < 30; k++) { ol_poll(a); usleep(50000); a->now += 50; }
                 char fen[100];
                 pos_to_fen(&a->game.pos, fen, sizeof fen);
                 printf("> %-10s | %s\n  msg: %s\n", tok, fen, a->msg);
@@ -1473,10 +1784,11 @@ int main(int argc, char **argv) {
     char opp_line[96];
     opp_name(a->opp, a->level, opp_line, sizeof opp_line);
     if (!a->training) say(a, MSG_INFO, "Opponent: %s. Type your move and press Enter. /help for commands.", opp_line);
+    if (start_online) { a->now = SDL_GetTicks(); ol_start(a); }
 
     while (running) {
         a->now = SDL_GetTicks();
-        bool busy = a->animating || opp_busy(a->opp) || a->now < a->peek_until || a->sq_drill ||
+        bool busy = a->animating || opp_busy(a->opp) || a->now < a->peek_until || a->sq_drill || a->online ||
                     (a->drill >= 0 && a->dstate == DS_AUTO);
         if (a->sq_drill && a->now >= a->sq_end) { end_square_drill(a, true); }
         SDL_Event e;
@@ -1503,6 +1815,16 @@ int main(int argc, char **argv) {
                         if (e.key.mod & SDL_KMOD_CTRL) a->input_len = 0;
                         else if (a->input_len) a->input_len--;
                         a->input[a->input_len] = 0;
+                        break;
+                    case SDLK_V:
+                        if (e.key.mod & SDL_KMOD_CTRL) {
+                            char *clip = SDL_GetClipboardText();
+                            for (const char *c = clip ? clip : ""; *c; c++)
+                                if (*c > 32 && *c < 127 && a->input_len < (int)sizeof a->input - 1) a->input[a->input_len++] = *c;
+                                else if (*c == ' ' && a->input_len && a->input_len < (int)sizeof a->input - 1) a->input[a->input_len++] = ' ';
+                            a->input[a->input_len] = 0;
+                            SDL_free(clip);
+                        }
                         break;
                     case SDLK_LEFT: if (a->review) rv_goto(a, a->rv_ply - 1); break;
                     case SDLK_RIGHT: if (a->review) rv_goto(a, a->rv_ply + 1); break;
@@ -1543,7 +1865,8 @@ int main(int argc, char **argv) {
         GameStatus st = game_status(&a->game);
         drill_tick(a);
         st = game_status(&a->game);
-        bool engine_plays = (a->drill < 0 || a->dstate == DS_PLAY) && !a->scan && !a->threat && !a->review &&
+        if (ol_poll(a)) dirty = true;
+        bool engine_plays = (a->drill < 0 || a->dstate == DS_PLAY) && !a->scan && !a->threat && !a->review && !a->online &&
                             !a->sq_drill && (a->twait == TW_NONE || !a->training);
         if (engine_plays && st == ST_ONGOING && a->game.pos.side != a->human && !opp_busy(a->opp) && !a->animating) {
             opp_go(a->opp, &a->game, a->drill >= 0 ? LEVEL_MAX : a->level);
@@ -1551,7 +1874,8 @@ int main(int argc, char **argv) {
         }
         if (st != last_status) { dirty = true; last_status = st; }
         if (a->now / 530 != last_blink) { last_blink = a->now / 530; dirty = true; }
-        if (a->animating || a->sq_drill || (a->peek_until && a->now < a->peek_until + 50)) dirty = true;
+        if (a->animating || a->sq_drill || a->online == OL_SEEKING || a->online == OL_PLAYING ||
+            (a->peek_until && a->now < a->peek_until + 50)) dirty = true;
         if (!dirty) continue;
         dirty = false;
 
@@ -1578,6 +1902,7 @@ int main(int argc, char **argv) {
         SDL_RenderPresent(ren);
     }
 
+    ol_close_all(a);
     opp_destroy(a->opp);
     if (tex) SDL_DestroyTexture(tex);
     if (surf) cairo_surface_destroy(surf);

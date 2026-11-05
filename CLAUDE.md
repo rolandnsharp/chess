@@ -10,6 +10,9 @@ C chess trainer: every move is typed in standard notation (SAN). The player is
     CHESS_SEED=5 SHOT_SCRIPT="/train;.;none;." ./chess --screenshot out.png
         # scripted input: ';'-separated, '.' = Enter; prints each message. Remove data/*_log.tsv
         # and data/progress.tsv after tests: they are the player's real records.
+    CHESS_LICHESS_URL=http://127.0.0.1:PORT LICHESS_TOKEN=good ...   # point /lichess at a mock server
+Live lichess play is deliberately limited to rated 15+10 (OL_MINUTES/OL_INCREMENT in src/app.h)
+and locks out the engine and drills during a game; keep it that way (fair play).
 
 ## Coaching loop ("review my games", "update my plan")
 

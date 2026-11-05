@@ -11,7 +11,7 @@ A chess board you play by typing standard notation (SAN) — `e4`, `Nf3`, `exd5`
                     # set SF_ARCH=x86-64-avx2 etc. on other machines)
     ./chess [--black] [--level 1-10] [--fen FEN]
 
-Needs SDL3, cairo, pango and librsvg. Without Stockfish the app uses its small
+Needs SDL3, cairo, pango, librsvg and libcurl. Without Stockfish the app uses its small
 built-in engine; with it, levels 1–9 are Elo 1320–2920 and 10 is full strength.
 
 ## Commands (type in the move box)
@@ -30,6 +30,7 @@ built-in engine; with it, levels 1–9 are Elo 1320–2920 and 10 is full streng
 | `/train` (or `./chess train`) | today's guided session from your plan; `/skip` a step, `/stop` |
 | `/puzzles [themes]` | lichess puzzles near your level (e.g. `fork`, `defence,quiet`); tracks a puzzle rating |
 | `/review [win\|loss\|last]` | review one of your games yourself first (←/→ to step, type `Nd2 threat` at a move you'd change), then `/engine` |
+| `/lichess` (or `./chess lichess`) | a rated **15+10** game on lichess, moves typed as always; `/resign`, `/draw`, `/abort`, `/claim` |
 | `/threats` | what does your opponent's last move threaten? type it, or `none` |
 | `/scan [captures\|checks]` | type every check and capture, yours then your opponent's; scored against the legal-move list |
 | `/flip`, `/fen`, `/pgn`, `/resign`, `/help`, `/quit` | |
@@ -75,6 +76,17 @@ Puzzles are picked about 300 points below your puzzle rating, aiming for about
 85% first-try success (see `docs/improving.md`). Missed ones come back the next
 day and then on a spaced schedule. The puzzle database is CC0, from lichess.org.
 
+## Live lichess games
+
+One time control only: rated 15+10 rapid, slow enough to check the opponent's
+threats on every move. First time: `/lichess` copies the token page link to
+your clipboard; create a token with the "Play games with the board API"
+permission, then type `/token ` and paste it (Ctrl+V). It is saved in
+`data/lichess_token`, readable only by you. During a live game the engine,
+drills and hints are disabled (only `/resign /draw /abort /claim /flip /coords`
+work), so the app stays within lichess's fair-play rules. Your finished games
+come into the analysis with `make update`.
+
 ## Training plan
 
 `/train` walks through `data/plan.txt` step by step (falls back to
@@ -89,6 +101,7 @@ The plan is meant to be rewritten by a coach (Claude, see `CLAUDE.md`) after
 - `src/render.c` — cairo/pango drawing; `src/main.c` — SDL3 window, input, drill flow
 - `src/drill.c` — drill loading and spaced-repetition scheduling
 - `src/puzzles.c` — lichess puzzle selection, puzzle rating, reviews
+- `src/lichess.c`, `src/json.c` — lichess Board API over libcurl (threaded streams), small JSON reader
 - `docs/improving.md` — what the research says about improving, and how the trainer applies it
 - `assets/pieces/cburnett` — piece set by Colin M.L. Burnett (GPLv2+), via lichess
 - `analysis/` — game analysis scripts (python-chess + Stockfish; `python3 -m venv .venv && .venv/bin/pip install chess`)

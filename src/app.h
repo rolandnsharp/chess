@@ -9,6 +9,7 @@
 #include "drill.h"
 #include "puzzles.h"
 #include "review.h"
+#include "lichess.h"
 #include "engine.h"
 
 enum { MSG_INFO, MSG_NOTE, MSG_ERROR, MSG_GOOD };
@@ -18,6 +19,11 @@ enum { SC_OFF = 0, SC_ASK, SC_RESULT };
 enum { TH_OFF = 0, TH_ASK, TH_RESULT };
 enum { TW_NONE = 0, TW_BEGIN, TW_AGAIN, TW_FINISHED };
 enum { RV_OFF = 0, RV_SELF, RV_SHOWN };
+enum { OL_OFF = 0, OL_SEEKING, OL_PLAYING, OL_OVER };
+
+/* the only live time control offered: slow enough to check every move */
+#define OL_MINUTES 15
+#define OL_INCREMENT 10
 
 typedef struct {
     int ply;       /* index of your move that you think was wrong */
@@ -109,6 +115,16 @@ typedef struct {
     char lp_theme[64];
     Drill lp_drill;
     double lp_rating_start;
+
+    /* live lichess game */
+    int online;            /* OL_* */
+    LStream *ol_events, *ol_seek, *ol_game;
+    char ol_token[128], ol_user[48], ol_id[24];
+    char ol_name[2][64];
+    long ol_time[2];       /* ms left at ol_clock_at */
+    uint64_t ol_clock_at, ol_since;
+    char ol_moves[MAX_PLY * 6]; /* moves as the server last sent them */
+    char ol_status[24];
 
     /* self-review */
     int review;            /* RV_* */

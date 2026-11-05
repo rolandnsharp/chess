@@ -468,6 +468,16 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
         snprintf(status, sizeof status, "%s  ·  %d found  ·  %llu s",
                  a->scan_phase ? "Their moves" : "Your moves", k,
                  (unsigned long long)((a->now - a->scan_start) / 1000));
+    } else if (a->online == OL_SEEKING) {
+        unsigned long long secs = (a->now - a->ol_since) / 1000;
+        snprintf(status, sizeof status, "Seeking rated %d+%d  ·  %llu:%02llu", OL_MINUTES, OL_INCREMENT, secs / 60, secs % 60);
+    } else if (a->online == OL_PLAYING && st == ST_ONGOING) {
+        if (a->game.pos.side == a->human && a->game.nply)
+            snprintf(status, sizeof status, "They played %s. What does it want?", a->game.san[a->game.nply - 1]);
+        else if (a->game.pos.side == a->human)
+            snprintf(status, sizeof status, "Your move");
+        else
+            snprintf(status, sizeof status, "Their move...");
     } else if (a->review) {
         const ReviewGame *g = &a->rv.g[a->rv_cur];
         if (a->review == RV_SELF)
@@ -547,6 +557,24 @@ static void draw_panel(App *a, cairo_t *cr, double x, double y, double w, double
     }
 }
 
+/* a live game's clock, right-aligned at x; the side to move ticks */
+static void draw_clock(App *a, cairo_t *cr, int color, double right, double y) {
+    long ms = a->ol_time[color];
+    bool running = a->online == OL_PLAYING && !strcmp(a->ol_status, "started") && a->game.nply >= 2 &&
+                   a->game.pos.side == color;
+    if (running) ms -= (long)(a->now - a->ol_clock_at);
+    if (ms < 0) ms = 0;
+    char t[24];
+    long s = ms / 1000;
+    if (ms < 10000) snprintf(t, sizeof t, "%ld.%ld", s, (ms % 1000) / 100);
+    else snprintf(t, sizeof t, "%ld:%02ld", s / 60, s % 60);
+    double w = 92, hgt = 30;
+    set(cr, running ? (ms < 60000 ? HEX(0x6b2a22, 1) : HEX(0x3d4a35, 1)) : C_CARD);
+    rounded(cr, right - w, y - 2, w, hgt, 6);
+    cairo_fill(cr);
+    text(cr, t, "DejaVu Sans Mono Bold 18px", right - 10, y + 2, running && ms < 60000 ? C_ERROR : running ? C_TEXT : C_MUTED, RIGHT, 0);
+}
+
 void render_frame(App *a, cairo_t *cr, double w, double h, double scale) {
     cairo_pattern_t *bg = cairo_pattern_create_linear(0, 0, 0, h);
     cairo_pattern_add_color_stop_rgb(bg, 0, C_BG_TOP.r, C_BG_TOP.g, C_BG_TOP.b);
@@ -569,14 +597,23 @@ void render_frame(App *a, cairo_t *cr, double w, double h, double scale) {
         const ReviewGame *g = &a->rv.g[a->rv_cur];
         snprintf(opp, sizeof opp, "%s", g->me_white ? g->black : g->white);
     }
+    char you[96] = "You";
+    if (a->online == OL_PLAYING || a->online == OL_OVER) {
+        snprintf(opp, sizeof opp, "%s", a->ol_name[!a->human]);
+        snprintf(you, sizeof you, "%s", a->ol_name[a->human]);
+    }
     int top_color = a->flipped ? WHITE : BLACK;
-    const char *top_name = top_color == a->human ? "You" : opp;
-    const char *bot_name = top_color == a->human ? opp : "You";
+    const char *top_name = top_color == a->human ? you : opp;
+    const char *bot_name = top_color == a->human ? opp : you;
     draw_player(a, cr, top_color, top_name, bx - 10, by - 10 - label, size, scale);
     draw_player(a, cr, !top_color, bot_name, bx - 10, by + size + 16, size, scale);
 
     draw_board(a, cr, bx, by, size, scale);
     draw_scan_arrows(a, cr, bx, by, size);
+    if (a->online == OL_PLAYING || a->online == OL_OVER) {
+        draw_clock(a, cr, top_color, bx + size + 10, by - 10 - label);
+        draw_clock(a, cr, !top_color, bx + size + 10, by + size + 16);
+    }
 
     double px = bx + size + 10 + m, pw = w - px - m;
     draw_panel(a, cr, px, m, pw, h - 2 * m);
