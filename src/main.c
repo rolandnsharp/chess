@@ -11,6 +11,7 @@
 
 #include "app.h"
 #include "json.h"
+#include "sound.h"
 
 static void say(App *a, int kind, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
 static void say(App *a, int kind, const char *fmt, ...) {
@@ -94,6 +95,7 @@ static void after_move(App *a, Move m) {
         a->saved = save_pgn(a, path, sizeof path);
         bool won = (strcmp(game_result(&a->game), "1-0") == 0) == (a->human == WHITE) &&
                    strcmp(game_result(&a->game), "1/2-1/2") != 0;
+        sound_play(won ? SFX_WIN : SFX_END);
         say(a, won ? MSG_GOOD : MSG_NOTE, "%s. %s Saved to games/. %s",
             status_text(st), won ? "Well played!" : "", a->training ? "Enter to continue." : "/new for another.");
         if (a->training) train_item(a);
@@ -143,6 +145,7 @@ static void leave_modes(App *a);
 
 static void drill_finish(App *a, bool ok, const char *extra) {
     Drill *d = cur_drill(a);
+    sound_play(ok ? SFX_CORRECT : SFX_WRONG);
     if (!a->drecorded) train_item(a);
     drill_record(a, ok);
     a->dstate = DS_DONE;
@@ -273,6 +276,7 @@ static void drill_session(App *a, const char *kind) {
 /* show the answer: back to the start and play the solution through */
 static void drill_show(App *a, const char *why) {
     Drill *d = cur_drill(a);
+    sound_play(SFX_WRONG);
     a->dfailed = true;
     if (!a->drecorded) train_item(a);
     drill_record(a, false);
@@ -305,6 +309,7 @@ static void drill_user_move(App *a, Move m, const char *typed) {
     }
     if (is_line) {
         a->dfailed = true;
+        sound_play(SFX_WRONG);
         say(a, MSG_ERROR, "%s isn't your repertoire move. Here you play %s - type it to go on.", typed, d->sol[a->dstep]);
         return;
     }
@@ -474,6 +479,7 @@ static void scan_finish_phase(App *a) {
             strncat(missed, s, sizeof missed - strlen(missed) - 1);
         }
     bool all = found == a->scan_n;
+    sound_play(all ? SFX_CORRECT : SFX_WRONG);
     say(a, all ? MSG_GOOD : MSG_ERROR, "%d of %d in %.0f s%s%s%s.  Session: %d of %d.  Enter to go on.",
         found, a->scan_n, a->scan_secs, all ? " - all of them!" : ". Missed:", missed,
         a->scan_wrong ? "" : "", a->scan_sess_found, a->scan_sess_total);
@@ -523,6 +529,7 @@ static void scan_input(App *a, const char *line) {
     SanResult r = san_parse(&a->scan_pos, line, false, &m, why, sizeof why);
     if (r == SAN_ERR) {
         a->scan_wrong++;
+        sound_play(SFX_ERROR);
         say(a, MSG_ERROR, "%s - %s", line, why);
         return;
     }
@@ -537,9 +544,11 @@ static void scan_input(App *a, const char *line) {
             for (int j = 0; j < a->scan_n; j++) k += a->scan_found[j];
             if (r == SAN_OK_NOTE) say(a, MSG_NOTE, "✓ (%d found)  %s", k, why);
             else say(a, MSG_GOOD, "%s  ✓   (%d found)", san, k);
+            sound_play(SFX_TICK);
             return;
         }
     a->scan_wrong++;
+    sound_play(SFX_ERROR);
     say(a, MSG_ERROR, "%s is legal, but it isn't %s.", san, SCAN_NOT[a->scan_mode]);
 }
 
@@ -674,6 +683,7 @@ static void threat_input(App *a, const char *line) {
         if (!strncmp(why, "You have no ", 12)) snprintf(fixed, sizeof fixed, "%s has no %s", them, why + 12);
         else if (!strncmp(why, "You're in check", 15)) snprintf(fixed, sizeof fixed, "%s would be in check", them);
         else snprintf(fixed, sizeof fixed, "%s", why);
+        sound_play(SFX_ERROR);
         say(a, MSG_ERROR, "%s - %s (typing %s's move)", line, fixed, them);
         return;
     }
@@ -683,6 +693,7 @@ static void threat_input(App *a, const char *line) {
     a->threat = TH_RESULT;
     a->th_sess_n++;
     a->th_sess_ok += ok;
+    sound_play(ok ? SFX_CORRECT : SFX_WRONG);
     threat_log(a, ok, line);
     train_item(a);
     /* arrows: the threats, plus a wrong guess in orange */
@@ -883,6 +894,7 @@ static void train_end_step(App *a) {
             len += snprintf(a->banner + len, sizeof a->banner - (size_t)len, "%s: %s\n", label, a->plan[i].summary);
         }
         new_game(a, NULL, a->pref_side);
+        sound_play(SFX_WIN);
         say(a, MSG_GOOD, "Well done. Results are saved in data/train_log.tsv for your coach. Enter for free play.");
         return;
     }
@@ -1037,7 +1049,7 @@ static void review_mark(App *a, const char *line) {
     if (!tag_ok) { say(a, MSG_ERROR, "Why '%s'? Use one of: hung, threat, capture, calc, plan, time, other.", tag); return; }
     Move m;
     char why[256];
-    if (san_parse(&a->game.pos, mv, false, &m, why, sizeof why) == SAN_ERR) { say(a, MSG_ERROR, "%s - %s", mv, why); return; }
+    if (san_parse(&a->game.pos, mv, false, &m, why, sizeof why) == SAN_ERR) { sound_play(SFX_ERROR); say(a, MSG_ERROR, "%s - %s", mv, why); return; }
     char san[16];
     move_to_san(&a->game.pos, m, san, sizeof san);
     char a1[16], b1[16];
@@ -1125,6 +1137,7 @@ static void review_reveal(App *a) {
     review_log(a);
     train_item(a);
     rv_goto(a, first_missed >= 0 ? first_missed : a->rv_nmarks ? a->rv_mark[0].ply : a->rv_ply);
+    sound_play(a->rv_found == a->rv_total && a->rv_total ? SFX_CORRECT : SFX_END);
     say(a, a->rv_found == a->rv_total && a->rv_total ? MSG_GOOD : MSG_INFO,
         "You found %d of the %d mistakes the engine sees. Arrows: red played, green best, orange yours. "
         "%s", a->rv_found, a->rv_total, a->training ? "Enter to continue." : "/review for another game.");
@@ -1215,6 +1228,7 @@ static void ol_apply_state(App *a, JNode *st) {
         const char *verdict = !winner[0] ? (strcmp(status, "aborted") && strcmp(status, "noStart") ? "Draw." : "")
                             : !strcmp(winner, me) ? "You won!" : "You lost.";
         a->online = OL_OVER;
+        sound_play(winner[0] && !strcmp(winner, me) ? SFX_WIN : SFX_END);
         ol_close_all(a);
         say(a, !strcmp(winner, me) ? MSG_GOOD : MSG_NOTE,
             "%s. %s  It's on lichess.org/%s - make update brings it into your analysis. /lichess for another.",
@@ -1253,6 +1267,7 @@ static void ol_start_game(App *a, const char *id, const char *color) {
     a->ol_game = ls_open(path, NULL, a->ol_token);
     snprintf(a->banner, sizeof a->banner, "Lichess  ·  rated %d+%d  ·  you have %s\nBefore every move: what does their last move want? "
              "/resign, /draw, /abort (first moves only).", OL_MINUTES, OL_INCREMENT, a->human == WHITE ? "White" : "Black");
+    sound_play(SFX_START);
     say(a, MSG_GOOD, "Game on! lichess.org/%s", id);
 }
 
@@ -1420,7 +1435,7 @@ static const char *HELP =
     "/scan [captures|checks] (list every check and capture) · /threats (what does their move threaten?) · "
     "/train (today's guided session) · /skip · /stop · /puzzles [themes] (lichess, at your level) · "
     "/review [win|loss|last] (analyse a game yourself, then /engine) · "
-    "/lichess (a rated 15+10 game on lichess; /token to set up) · "
+    "/lichess (a rated 15+10 game on lichess; /token to set up) · /sound [on|off] · "
     "/strict · /pgn (save) · /fen (copy) · /resign · /quit";
 
 static void next_square(App *a) {
@@ -1444,6 +1459,7 @@ static void end_square_drill(App *a, bool finished) {
     if (!finished) { say(a, MSG_INFO, "Square drill stopped."); return; }
     bool record = a->sq_score > a->sq_best;
     if (record) a->sq_best = a->sq_score;
+    sound_play(record ? SFX_WIN : SFX_CORRECT);
     if (a->training && a->twait == TW_NONE) {
         train_item(a);
         a->sq_sess_rounds++;
@@ -1465,10 +1481,12 @@ static void square_answer(App *a) {
     sq_name(a->sq_target, name);
     if (a->input[0] == name[0] && a->input[1] == name[1]) {
         a->sq_score++;
+        sound_play(SFX_TICK);
         a->msg[0] = 0;
         next_square(a);
     } else {
         a->sq_misses++;
+        sound_play(SFX_ERROR);
         a->sq_flash = a->now;
         say(a, MSG_ERROR, "%s - that was %s.", a->input, name);
         next_square(a);
@@ -1485,7 +1503,7 @@ static bool command(App *a, const char *line) {
         /* fair play: during a live game only game commands work - no engine, drills or hints */
         if (ol_command(a, cmd, arg)) return true;
         if (strcmp(cmd, "flip") && strcmp(cmd, "coords") && strcmp(cmd, "help") && strcmp(cmd, "h") &&
-            strcmp(cmd, "?") && strcmp(cmd, "strict")) {
+            strcmp(cmd, "?") && strcmp(cmd, "strict") && strcmp(cmd, "sound")) {
             say(a, MSG_ERROR, "Not during a lichess game. Game commands: /resign /draw /abort /claim /flip /coords.");
             return true;
         }
@@ -1573,6 +1591,11 @@ static bool command(App *a, const char *line) {
         leave_modes(a);
         new_game(a, NULL, a->pref_side);
         say(a, MSG_INFO, "Free play.");
+    } else if (!strcmp(cmd, "sound")) {
+        bool on = !strcmp(arg, "on") ? true : !strcmp(arg, "off") ? false : !sound_enabled();
+        sound_set_enabled(on);
+        if (on) sound_play(SFX_MOVE);
+        say(a, MSG_INFO, "Sound %s (%s). CHESS_SOUND_DEVICE picks another device.", on ? "on" : "off", sound_device());
     } else if (!strcmp(cmd, "coords")) {
         a->coords = !a->coords;
         say(a, MSG_INFO, a->coords ? "Coordinates on." : "Coordinates off. /squares drills naming squares.");
@@ -1652,7 +1675,7 @@ static bool submit(App *a) {
     Move m;
     char why[256];
     SanResult r = san_parse(&a->game.pos, line, a->strict, &m, why, sizeof why);
-    if (r == SAN_ERR) { say(a, MSG_ERROR, "%s - %s", line, why); return true; }
+    if (r == SAN_ERR) { sound_play(SFX_ERROR); say(a, MSG_ERROR, "%s - %s", line, why); return true; }
     if (r == SAN_OK_NOTE) say(a, MSG_NOTE, "%s", why);
     else a->msg[0] = 0;
     if (a->drill >= 0 && a->dstate == DS_ASK) { drill_user_move(a, m, line); return true; }
@@ -1683,7 +1706,7 @@ int main(int argc, char **argv) {
     srand(getenv("CHESS_SEED") ? (unsigned)atoi(getenv("CHESS_SEED")) : (unsigned)time(NULL));
     const char *fen = NULL, *moves = NULL, *shot = NULL;
     int shot_w = 1280, shot_h = 800;
-    bool shot_blind = false, start_training = false, start_online = false;
+    bool shot_blind = false, start_training = false, start_online = false, mute = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--black")) a->human = BLACK;
         else if (!strcmp(argv[i], "--level") && i + 1 < argc) a->level = atoi(argv[++i]);
@@ -1693,6 +1716,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--size") && i + 1 < argc) sscanf(argv[++i], "%dx%d", &shot_w, &shot_h);
         else if (!strcmp(argv[i], "--blind")) shot_blind = true;
         else if (!strcmp(argv[i], "--no-coords")) a->coords = false;
+        else if (!strcmp(argv[i], "--mute")) mute = true;
         else if (!strcmp(argv[i], "--train") || !strcmp(argv[i], "train")) start_training = true;
         else if (!strcmp(argv[i], "--lichess") || !strcmp(argv[i], "lichess")) start_online = true;
         else { usage(); return 2; }
@@ -1764,6 +1788,10 @@ int main(int argc, char **argv) {
     }
 
     if (!SDL_Init(SDL_INIT_VIDEO)) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
+    sound_init();
+    if (mute) sound_set_enabled(false);
+    a->snd_nply = a->game.nply;
+    a->snd_hash = a->game.hashes[a->game.nply];
     SDL_Window *win;
     SDL_Renderer *ren;
     if (!SDL_CreateWindowAndRenderer("Notation Trainer", 1280, 800,
@@ -1872,6 +1900,17 @@ int main(int argc, char **argv) {
             opp_go(a->opp, &a->game, a->drill >= 0 ? LEVEL_MAX : a->level);
             dirty = true;
         }
+        /* exactly one move added to the board, from anywhere (you, the engine,
+         * a drill reply, a lichess opponent, stepping through a review) */
+        if (a->game.nply == a->snd_nply + 1 && a->game.hashes[a->snd_nply] == a->snd_hash) {
+            const char *san = a->game.san[a->game.nply - 1];
+            sound_play(strchr(san, '+') || strchr(san, '#') ? SFX_CHECK
+                       : !strncmp(san, "O-O", 3) ? SFX_CASTLE
+                       : strchr(san, '=') ? SFX_PROMOTE
+                       : strchr(san, 'x') ? SFX_CAPTURE : SFX_MOVE);
+        }
+        a->snd_nply = a->game.nply;
+        a->snd_hash = a->game.hashes[a->game.nply];
         if (st != last_status) { dirty = true; last_status = st; }
         if (a->now / 530 != last_blink) { last_blink = a->now / 530; dirty = true; }
         if (a->animating || a->sq_drill || a->online == OL_SEEKING || a->online == OL_PLAYING ||
@@ -1903,6 +1942,7 @@ int main(int argc, char **argv) {
     }
 
     ol_close_all(a);
+    sound_shutdown();
     opp_destroy(a->opp);
     if (tex) SDL_DestroyTexture(tex);
     if (surf) cairo_surface_destroy(surf);

@@ -11,7 +11,7 @@ A chess board you play by typing standard notation (SAN) — `e4`, `Nf3`, `exd5`
                     # set SF_ARCH=x86-64-avx2 etc. on other machines)
     ./chess [--black] [--level 1-10] [--fen FEN]
 
-Needs SDL3, cairo, pango, librsvg and libcurl. Without Stockfish the app uses its small
+Needs SDL3, cairo, pango, librsvg, libcurl and ALSA. Without Stockfish the app uses its small
 built-in engine; with it, levels 1–9 are Elo 1320–2920 and 10 is full strength.
 
 ## Commands (type in the move box)
@@ -33,6 +33,7 @@ built-in engine; with it, levels 1–9 are Elo 1320–2920 and 10 is full streng
 | `/lichess` (or `./chess lichess`) | a rated **15+10** game on lichess, moves typed as always; `/resign`, `/draw`, `/abort`, `/claim` |
 | `/threats` | what does your opponent's last move threaten? type it, or `none` |
 | `/scan [captures\|checks]` | type every check and capture, yours then your opponent's; scored against the legal-move list |
+| `/sound [on\|off]` (or `--mute`) | sound effects: moves, captures, checks, right/wrong answers, game start and end |
 | `/flip`, `/fen`, `/pgn`, `/resign`, `/help`, `/quit` | |
 
 Up/Down recall earlier input; Esc clears. Finished games are saved to `games/`.
@@ -101,6 +102,7 @@ The plan is meant to be rewritten by a coach (Claude, see `CLAUDE.md`) after
 - `src/render.c` — cairo/pango drawing; `src/main.c` — SDL3 window, input, drill flow
 - `src/drill.c` — drill loading and spaced-repetition scheduling
 - `src/puzzles.c` — lichess puzzle selection, puzzle rating, reviews
+- `src/sound.c` — synthesised sound effects over ALSA (the card is only opened while a sound plays; `CHESS_SOUND_DEVICE` overrides the device, `CHESS_SOUND=0` mutes)
 - `src/lichess.c`, `src/json.c` — lichess Board API over libcurl (threaded streams), small JSON reader
 - `docs/improving.md` — what the research says about improving, and how the trainer applies it
 - `assets/pieces/cburnett` — piece set by Colin M.L. Burnett (GPLv2+), via lichess

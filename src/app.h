@@ -156,6 +156,9 @@ typedef struct {
     char plan_note[800], plan_source[64];
     int sq_sess_rounds, sq_sess_score;
 
+    int snd_nply;          /* board as last heard, to sound each new move once */
+    uint64_t snd_hash;
+
     bool saved; /* finished game written to games/ */
     char base_dir[1024];
     uint64_t now;
