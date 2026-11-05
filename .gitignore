@@ -1,0 +1,9 @@
+# build outputs
+/chess
+/test_chess
+*.o
+# Stockfish is cloned and built by `make stockfish`
+/third_party/
+# downloaded games and saved games (re-fetchable, personal)
+/data/
+/games/
